@@ -186,8 +186,16 @@ public class MainActivity extends Activity {
         findViewById(R.id.btnDirect).setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 String t = urlBar.getText().toString().trim();
-                if (!t.matches("(?i)^https?://\\S+$")) {
-                    Toast.makeText(MainActivity.this, "Cole o link direto do vídeo (http/https) na barra", Toast.LENGTH_LONG).show();
+                boolean http = t.matches("(?i)^https?://\\S+$");
+                boolean isPage = !http || (t.equals(web.getUrl()) && !isMedia(Uri.parse(t)));
+                if (isPage) {
+                    if (!vids.isEmpty()) {
+                        btnFound.performClick();
+                    } else {
+                        Toast.makeText(MainActivity.this,
+                                "Nenhum vídeo detectado ainda. Dê play no vídeo da página, espere carregar e toque aqui de novo. Ou cole o link direto do vídeo na barra.",
+                                Toast.LENGTH_LONG).show();
+                    }
                     return;
                 }
                 String n = Uri.parse(t).getLastPathSegment();
@@ -246,10 +254,13 @@ public class MainActivity extends Activity {
         super.onResume();
         Dl.listeners.add(activeListener);
         updateActive();
+        scanHandler.removeCallbacks(scanTask);
+        scanHandler.postDelayed(scanTask, 1500);
     }
 
     @Override protected void onPause() {
         Dl.listeners.remove(activeListener);
+        scanHandler.removeCallbacks(scanTask);
         saveLast(web.getUrl());
         super.onPause();
     }
@@ -389,15 +400,61 @@ public class MainActivity extends Activity {
         });
     }
 
+    static final Pattern MEDIA_EXT = Pattern.compile("(?i)\\.(mp4|m3u8|mkv|webm|mov|m4v)(?=$|[?#&/])");
+    static final Pattern RANGE_PARAM = Pattern.compile("([?&])(range|rn|rbuf|alr)=[^&]*");
+
     static boolean isMedia(Uri u) {
-        String p = u.getPath();
-        if (p == null) return false;
-        p = p.toLowerCase();
-        return p.endsWith(".mp4") || p.endsWith(".m3u8") || p.endsWith(".mkv") || p.endsWith(".webm")
-                || p.endsWith(".mov") || p.endsWith(".m4v");
+        String s = u.toString();
+        if (s.startsWith("blob:") || s.startsWith("data:")) return false;
+        String q = u.getQuery() == null ? "" : u.getQuery().toLowerCase();
+        String p = u.getPath() == null ? "" : u.getPath().toLowerCase();
+        if (p.contains("videoplayback")) return !q.contains("mime=audio") && !q.contains("mime%3daudio");
+        if (q.contains("mime=video") || q.contains("mime%3dvideo")) return true;
+        return MEDIA_EXT.matcher(s).find();
     }
 
+    /** Tira parâmetros de trecho (range=...) para o mesmo vídeo não aparecer várias vezes. */
+    static String normalize(String u) {
+        if (u.contains("videoplayback")) {
+            u = RANGE_PARAM.matcher(u).replaceAll("$1");
+            u = u.replace("?&", "?").replaceAll("&&+", "&").replaceAll("[?&]$", "");
+        }
+        return u;
+    }
+
+    // varre <video>/<source> da página (e iframes do mesmo site) em busca de links
+    static final String SCAN = "(function(){var r=[];function add(u){if(u&&/^https?:/i.test(u))r.push(u);}"
+            + "function sc(d){try{var v=d.querySelectorAll('video,video source');"
+            + "for(var i=0;i<v.length;i++){add(v[i].currentSrc);add(v[i].src);}"
+            + "var f=d.querySelectorAll('iframe');"
+            + "for(var j=0;j<f.length;j++){try{if(f[j].contentDocument)sc(f[j].contentDocument);}catch(e){}}"
+            + "}catch(e){}}sc(document);return JSON.stringify(r);})()";
+
+    final android.os.Handler scanHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    final Runnable scanTask = new Runnable() {
+        public void run() {
+            String cur = web.getUrl();
+            if (cur != null && cur.startsWith("http")) {
+                web.evaluateJavascript(SCAN, new android.webkit.ValueCallback<String>() {
+                    public void onReceiveValue(String val) {
+                        try {
+                            if (val == null || val.equals("null")) return;
+                            Object o = new org.json.JSONTokener(val).nextValue();
+                            if (!(o instanceof String)) return;
+                            org.json.JSONArray a = new org.json.JSONArray((String) o);
+                            for (int i = 0; i < a.length(); i++) addFound(a.getString(i));
+                        } catch (Exception ignored) {
+                        }
+                    }
+                });
+            }
+            scanHandler.postDelayed(this, 2500);
+        }
+    };
+
     void addFound(String u) {
+        u = normalize(u);
+        if (AdBlock.isAd(u)) return;
         if (vids.add(u)) updateFound();
         Dl.detected.remove(u);
         Dl.detected.add(u);

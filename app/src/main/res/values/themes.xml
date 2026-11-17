@@ -5,5 +5,14 @@
         <item name="android:windowBackground">#0E0E14</item>
         <item name="android:statusBarColor">#0E0E14</item>
         <item name="android:navigationBarColor">#0E0E14</item>
+        <item name="android:alertDialogTheme">@style/AppDialog</item>
+    </style>
+
+    <style name="AppDialog" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:colorBackground">#1B1B28</item>
+        <item name="android:colorAccent">#B388FF</item>
+        <item name="android:textColorPrimary">#FFFFFF</item>
+        <item name="android:textColorSecondary">#9A9AB0</item>
+        <item name="android:windowBackground">@drawable/bg_dialog</item>
     </style>
 </resources>

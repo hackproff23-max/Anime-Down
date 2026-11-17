@@ -1,16 +1,20 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-body{margin:0;background:#0E0E14;color:#fff;font-family:sans-serif;text-align:center;padding:40px 20px}
-img{width:96px;height:96px;border-radius:22px}
-h1{margin:14px 0 4px}p{color:#9A9AB0;line-height:1.5}
-form{margin:26px auto 0;max-width:460px;display:flex;gap:8px}
-input{flex:1;padding:12px;border-radius:10px;border:1px solid #2a2a3a;background:#16161F;color:#fff;font-size:16px}
-button{padding:12px 16px;border:0;border-radius:10px;background:#7C4DFF;color:#fff;font-size:16px}
+body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% 0%,#2a1f55 0%,#0E0E14 55%);color:#fff;font-family:sans-serif;text-align:center;padding:56px 20px 20px;box-sizing:border-box}
+img{width:104px;height:104px;border-radius:26px;box-shadow:0 10px 30px rgba(124,77,255,.45)}
+h1{margin:18px 0 6px;font-size:28px;letter-spacing:.5px}
+p{color:#9A9AB0;line-height:1.6;margin:0 auto;max-width:360px}
+form{margin:30px auto 0;max-width:460px;display:flex;gap:8px}
+input{flex:1;min-width:0;padding:14px 18px;border-radius:26px;border:1px solid #2f2f45;background:#16161F;color:#fff;font-size:16px;outline:none}
+input:focus{border-color:#7C4DFF}
+button{padding:14px 20px;border:0;border-radius:26px;background:linear-gradient(90deg,#7C4DFF,#D63384);color:#fff;font-size:16px;font-weight:bold}
+.tip{margin-top:34px;font-size:13px;color:#7A7A90}
 </style></head><body>
 <img src="logo.png" alt="">
 <h1>Anime-Down</h1>
-<p>Sem anúncios. Abra a página do vídeo, espere carregar e toque em<br><b>“Vídeos detectados”</b> para baixar.</p>
+<p>Navegue sem anúncios. Abra o episódio, <b>dê play</b> no vídeo e toque em <b>“Baixar vídeo”</b>.</p>
 <form action="https://www.google.com/search" method="get">
 <input name="q" placeholder="Pesquisar no Google"><button>Buscar</button></form>
+<div class="tip">Dica: toque na ★ para salvar favoritos e ver o histórico.</div>
 </body></html>

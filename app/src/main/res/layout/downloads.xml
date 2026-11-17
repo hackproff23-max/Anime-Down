@@ -7,10 +7,10 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="#16161F"
+        android:background="#0E0E14"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="12dp">
+        android:padding="14dp">
 
         <LinearLayout
             android:layout_width="0dp"
@@ -23,7 +23,7 @@
                 android:layout_height="wrap_content"
                 android:text="Downloads"
                 android:textColor="#FFFFFF"
-                android:textSize="20sp"
+                android:textSize="22sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -34,20 +34,25 @@
                 android:textSize="13sp" />
         </LinearLayout>
 
-        <Button
+        <ImageButton
             android:id="@+id/btnSettings"
-            style="?android:attr/borderlessButtonStyle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:minWidth="44dp"
-            android:text="⚙" />
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Conexões"
+            android:padding="10dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_settings" />
 
-        <Button
+        <ImageButton
             android:id="@+id/btnClear"
-            style="?android:attr/borderlessButtonStyle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Limpar" />
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Limpar concluídos"
+            android:padding="10dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_delete" />
     </LinearLayout>
 
     <FrameLayout
@@ -59,8 +64,13 @@
             android:id="@+id/list"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:divider="#22222E"
-            android:dividerHeight="1dp" />
+            android:clipToPadding="false"
+            android:divider="@android:color/transparent"
+            android:dividerHeight="10dp"
+            android:paddingBottom="12dp"
+            android:paddingLeft="12dp"
+            android:paddingRight="12dp"
+            android:paddingTop="4dp" />
 
         <TextView
             android:id="@+id/empty"
@@ -68,7 +78,7 @@
             android:layout_height="match_parent"
             android:gravity="center"
             android:padding="24dp"
-            android:text="Nenhum download ainda.\nAbra um vídeo no navegador e toque em “Vídeos detectados”."
+            android:text="Nenhum download ainda.\nAbra um vídeo no navegador, dê play e toque em “Baixar vídeo”."
             android:textColor="#9A9AB0" />
     </FrameLayout>
 </LinearLayout>
