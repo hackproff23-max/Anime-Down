@@ -115,6 +115,8 @@ public class MainActivity extends Activity {
             @Override public void onPageStarted(WebView v, String u, Bitmap icon) {
                 vids.clear();
                 updateFound();
+                autoDone = false;
+                scanHandler.removeCallbacks(autoTask);
                 if (u != null && !u.startsWith("file:")) urlBar.setText(u); else urlBar.setText("");
             }
 
@@ -322,6 +324,61 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------ favoritos e histórico
 
+    // ------------------------------------------------ download automático (até 30 MB)
+
+    static final long AUTO_MAX = 30L * 1024 * 1024;
+    boolean autoDone;
+    final Runnable autoTask = new Runnable() {
+        public void run() { autoProbe(); }
+    };
+
+    boolean autoOn() { return Store.sp(this).getBoolean("auto", true); }
+
+    void autoProbe() {
+        if (!autoOn() || autoDone || vids.isEmpty()) return;
+        List<String> urls = new ArrayList<>(vids);
+        if (urls.size() > 15) urls = new ArrayList<>(urls.subList(0, 15));
+        final Map<String, List<Probe.Opt>> results = new LinkedHashMap<>();
+        final int[] pending = {urls.size()};
+        final String referer = web.getUrl();
+        final String ua = web.getSettings().getUserAgentString();
+        for (final String u : urls) {
+            final String cookie = CookieManager.getInstance().getCookie(u);
+            Probe.pool.execute(new Runnable() {
+                public void run() {
+                    List<Probe.Opt> r;
+                    try {
+                        r = Probe.run(new Net(ua, referer, cookie, u, null), u);
+                    } catch (Throwable e) {
+                        r = new ArrayList<>();
+                    }
+                    final List<Probe.Opt> rr = r;
+                    runOnUiThread(new Runnable() {
+                        public void run() {
+                            results.put(u, rr);
+                            pending[0]--;
+                            if (pending[0] == 0) autoPick(results);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    /** Pega a melhor qualidade que tenha tamanho conhecido de até 30 MB. */
+    void autoPick(Map<String, List<Probe.Opt>> results) {
+        if (autoDone || !autoOn()) return;
+        List<Probe.Opt> shown = new ArrayList<>();
+        rebuildQuality(shown, results, null);
+        for (Probe.Opt o : shown) {
+            if (o.size > 0 && o.size <= AUTO_MAX) {
+                autoDone = true;
+                queueOpt(o, null);
+                return;
+            }
+        }
+    }
+
     void showMenu() {
         final String u = web.getUrl();
         final boolean page = u != null && (u.startsWith("http://") || u.startsWith("https://"));
@@ -330,6 +387,7 @@ public class MainActivity extends Activity {
         if (page) items.add(fav ? "★  Remover dos favoritos" : "☆  Adicionar aos favoritos");
         items.add("Favoritos");
         items.add("Histórico");
+        items.add("Download automático (até 30 MB): " + (autoOn() ? "ligado ✓" : "desligado"));
         final int off = page ? 1 : 0;
         new AlertDialog.Builder(this)
                 .setItems(items.toArray(new String[0]), new DialogInterface.OnClickListener() {
@@ -341,8 +399,14 @@ public class MainActivity extends Activity {
                                     Toast.LENGTH_SHORT).show();
                         } else if (which - off == 0) {
                             showList(true);
-                        } else {
+                        } else if (which - off == 1) {
                             showList(false);
+                        } else {
+                            boolean on = !autoOn();
+                            Store.sp(MainActivity.this).edit().putBoolean("auto", on).apply();
+                            Toast.makeText(MainActivity.this,
+                                    on ? "Download automático ligado (vídeos de até 30 MB)" : "Download automático desligado",
+                                    Toast.LENGTH_SHORT).show();
                         }
                     }
                 })
@@ -455,7 +519,13 @@ public class MainActivity extends Activity {
     void addFound(String u) {
         u = normalize(u);
         if (AdBlock.isAd(u)) return;
-        if (vids.add(u)) updateFound();
+        if (vids.add(u)) {
+            updateFound();
+            if (autoOn() && !autoDone) {
+                scanHandler.removeCallbacks(autoTask);
+                scanHandler.postDelayed(autoTask, 3000);
+            }
+        }
         Dl.detected.remove(u);
         Dl.detected.add(u);
         while (Dl.detected.size() > 40) Dl.detected.remove(Dl.detected.iterator().next());
@@ -546,7 +616,7 @@ public class MainActivity extends Activity {
                 return Long.compare(b.size, a.size);
             }
         });
-        ad.notifyDataSetChanged();
+        if (ad != null) ad.notifyDataSetChanged();
     }
 
     void queueOpt(Probe.Opt o, String nameOverride) {
