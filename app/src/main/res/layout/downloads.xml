@@ -5,6 +5,7 @@
     android:orientation="vertical">
 
     <LinearLayout
+        android:id="@+id/dlHeader"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="#0E0E14"
@@ -39,7 +40,7 @@
             android:layout_width="44dp"
             android:layout_height="44dp"
             android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Conexões"
+            android:contentDescription="Configurações"
             android:padding="10dp"
             android:scaleType="fitCenter"
             android:src="@drawable/ic_settings" />

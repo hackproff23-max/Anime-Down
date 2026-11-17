@@ -80,6 +80,9 @@ public class DownloadsActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         Dl.listeners.add(refresh);
+        Thm.apply(this);
+        findViewById(R.id.dlHeader).setBackgroundColor(Thm.bg(this));
+        summary.setTextColor(Thm.accent(this));
         refresh.run();
     }
 
@@ -166,7 +169,7 @@ public class DownloadsActivity extends Activity {
 
     void cast(final Item it) {
         Toast.makeText(this, "Procurando TVs no Wi-Fi…", Toast.LENGTH_SHORT).show();
-        Dlna.discover(this, 4000, new Dlna.Callback() {
+        Dlna.discover(this, SettingsActivity.dlnaSeconds(this) * 1000, new Dlna.Callback() {
             public void onResult(final List<Dlna.Device> devs) {
                 runOnUiThread(new Runnable() {
                     public void run() { pickTv(it, devs); }
@@ -182,8 +185,25 @@ public class DownloadsActivity extends Activity {
                     Toast.LENGTH_LONG).show();
             return;
         }
+        final boolean remember = Store.sp(this).getBoolean("dlna_remember", true);
+        String last = Store.sp(this).getString("dlna_last", "");
+        if (remember && !last.isEmpty()) {
+            for (int i = 0; i < devs.size(); i++) {
+                if (devs.get(i).name.equals(last)) {
+                    Dlna.Device d = devs.remove(i);
+                    devs.add(0, d);
+                    if (Store.sp(this).getBoolean("dlna_direct", false)) {
+                        startCast(it, d);
+                        return;
+                    }
+                    break;
+                }
+            }
+        }
         String[] names = new String[devs.size()];
-        for (int i = 0; i < names.length; i++) names[i] = devs.get(i).name;
+        for (int i = 0; i < names.length; i++) {
+            names[i] = (remember && devs.get(i).name.equals(last) ? "★  " : "") + devs.get(i).name;
+        }
         new AlertDialog.Builder(this)
                 .setTitle("Transmitir para…")
                 .setItems(names, new DialogInterface.OnClickListener() {
@@ -194,6 +214,7 @@ public class DownloadsActivity extends Activity {
     }
 
     void startCast(final Item it, final Dlna.Device d) {
+        Store.sp(this).edit().putString("dlna_last", d.name).apply();
         Toast.makeText(this, "Enviando para " + d.name + "…", Toast.LENGTH_SHORT).show();
         new Thread(new Runnable() {
             public void run() {
@@ -269,20 +290,7 @@ public class DownloadsActivity extends Activity {
     }
 
     void settings() {
-        final int[] opts = {4, 8, 16, 32};
-        String[] labels = new String[opts.length];
-        int cur = Dl.threads();
-        for (int i = 0; i < opts.length; i++) {
-            labels[i] = opts[i] + " conexões" + (opts[i] == cur ? "  (atual)" : "") + (opts[i] == 8 ? "  •  padrão" : "");
-        }
-        new AlertDialog.Builder(this)
-                .setTitle("Conexões simultâneas por download")
-                .setItems(labels, new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface d, int w) {
-                        Dl.setThreads(opts[w]);
-                        Toast.makeText(DownloadsActivity.this, "Vale para os próximos downloads e ao continuar", Toast.LENGTH_SHORT).show();
-                    }
-                }).show();
+        startActivity(new Intent(this, SettingsActivity.class));
     }
 
     void open(Item it) {

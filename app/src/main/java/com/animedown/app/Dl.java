@@ -17,15 +17,17 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 final class Dl {
     static final List<Item> items = new ArrayList<>();
     static final List<Runnable> listeners = new CopyOnWriteArrayList<>();
     static final LinkedHashSet<String> detected = new LinkedHashSet<>();
     static final Handler main = new Handler(Looper.getMainLooper());
-    static final ExecutorService pool = Executors.newFixedThreadPool(3);
+    /** Quantos downloads rodam ao mesmo tempo (1 a 10, configurável). */
+    static final ThreadPoolExecutor pool = new ThreadPoolExecutor(3, 3, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>());
     static Context app;
     static boolean loaded;
 
@@ -34,6 +36,7 @@ final class Dl {
         loaded = true;
         app = c.getApplicationContext();
         System.setProperty("http.maxConnections", "64");
+        applyPool(maxActive());
         try {
             JSONArray a = new JSONArray(app.getSharedPreferences("dl", 0).getString("items", "[]"));
             for (int i = 0; i < a.length(); i++) {
@@ -66,9 +69,35 @@ final class Dl {
         });
     }
 
+    // ------------------------------------------------ configurações
+
+    /** Conexões por download (partes baixadas em paralelo). */
     static int threads() { return app.getSharedPreferences("dl", 0).getInt("threads", 8); }
 
     static void setThreads(int n) { app.getSharedPreferences("dl", 0).edit().putInt("threads", n).apply(); }
+
+    /** Downloads simultâneos (1 a 10). */
+    static int maxActive() {
+        int n = app.getSharedPreferences("dl", 0).getInt("maxdl", 3);
+        return Math.max(1, Math.min(10, n));
+    }
+
+    static void setMaxActive(int n) {
+        n = Math.max(1, Math.min(10, n));
+        app.getSharedPreferences("dl", 0).edit().putInt("maxdl", n).apply();
+        applyPool(n);
+    }
+
+    static void applyPool(int n) {
+        // a ordem importa: nunca deixar core maior que max
+        if (n > pool.getMaximumPoolSize()) {
+            pool.setMaximumPoolSize(n);
+            pool.setCorePoolSize(n);
+        } else {
+            pool.setCorePoolSize(n);
+            pool.setMaximumPoolSize(n);
+        }
+    }
 
     static File dir(Item it) { return new File(app.getFilesDir(), "parts/" + it.id); }
 

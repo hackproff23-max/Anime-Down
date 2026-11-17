@@ -54,7 +54,7 @@ public class MainActivity extends Activity {
     ProgressBar bar;
     android.widget.Button btnFound;
     FrameLayout root;
-    View content, activeBox;
+    View content, activeBox, brandBar, topBar;
     TextView activeTxt;
     ProgressBar activeProg;
     View customView;
@@ -78,6 +78,16 @@ public class MainActivity extends Activity {
         activeBox = findViewById(R.id.activeBox);
         activeTxt = (TextView) findViewById(R.id.activeTxt);
         activeProg = (ProgressBar) findViewById(R.id.activeProg);
+        brandBar = findViewById(R.id.brandBar);
+        topBar = findViewById(R.id.topBar);
+        findViewById(R.id.btnSettings).setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { startActivity(new Intent(MainActivity.this, SettingsActivity.class)); }
+        });
+        findViewById(R.id.btnCast).setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, SettingsActivity.class).putExtra("section", "dlna"));
+            }
+        });
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -255,6 +265,7 @@ public class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         Dl.listeners.add(activeListener);
+        applyTheme();
         updateActive();
         scanHandler.removeCallbacks(scanTask);
         scanHandler.postDelayed(scanTask, 1500);
@@ -278,6 +289,19 @@ public class MainActivity extends Activity {
     }
 
     void openDownloads() { startActivity(new Intent(this, DownloadsActivity.class)); }
+
+    /** Aplica as cores do tema escolhido nas configurações. */
+    void applyTheme() {
+        Thm.apply(this);
+        int bg = Thm.bg(this), sf = Thm.surface(this), ac = Thm.accent(this);
+        brandBar.setBackgroundColor(bg);
+        topBar.setBackgroundColor(bg);
+        activeBox.setBackgroundColor(sf);
+        activeTxt.setTextColor(0xFFFFFFFF);
+        ((TextView) findViewById(R.id.brandTitle)).setTextColor(ac);
+        btnFound.setBackground(Thm.round(ac, Thm.dp(this, 26)));
+        btnFound.setTextColor(Thm.onAccent(this));
+    }
 
     void updateActive() {
         String s = Dl.summary();
