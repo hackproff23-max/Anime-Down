@@ -2,6 +2,8 @@ package com.animedown.app;
 
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.DialogInterface;
+import android.content.Intent;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.text.TextUtils;
@@ -79,6 +81,38 @@ final class QualityDialog {
         return l;
     }
 
+    /** Depois de escolher o vídeo/qualidade: pergunta se quer assistir online ou baixar. */
+    static void choose(final MainActivity a, final Probe.Opt o, final String name) {
+        new AlertDialog.Builder(a)
+                .setTitle(name)
+                .setMessage(o.label + "  \u2022  " + o.sub())
+                .setPositiveButton("\u25B6  Assistir", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) { play(a, o, name); }
+                })
+                .setNeutralButton("\u2B07  Baixar", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) { a.queueOpt(o, name); }
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    /** Abre o player nativo com o mesmo Referer, User-Agent e cookies da página. */
+    static void play(MainActivity a, Probe.Opt o, String name) {
+        String referer = a.web.getUrl();
+        if (referer != null && referer.startsWith("file:")) referer = null;
+        Intent i = new Intent(a, PlayerActivity.class);
+        i.putExtra("url", o.url);
+        i.putExtra("name", name);
+        i.putExtra("referer", referer);
+        i.putExtra("ua", a.web.getSettings().getUserAgentString());
+        i.putExtra("cookie", CookieManager.getInstance().getCookie(o.url));
+        i.putExtra("hls", o.hls);
+        i.putExtra("height", o.height);
+        i.putExtra("quality", "Original".equals(o.label) ? "" : o.label);
+        i.putExtra("size", o.size);
+        a.startActivity(i);
+    }
+
     static void show(final MainActivity a, final List<String> urls, final String nameOverride) {
         final List<Group> groups = new ArrayList<>();
         String title = pageTitle(a);
@@ -152,8 +186,8 @@ final class QualityDialog {
             public boolean onGroupClick(ExpandableListView l, View v, int gp, long id) {
                 Group g = groups.get(gp);
                 if (g.opts.size() == 1) {
-                    a.queueOpt(g.opts.get(0), g.name);
                     dlg.dismiss();
+                    choose(a, g.opts.get(0), g.name);
                     return true;
                 }
                 return g.opts.isEmpty();
@@ -162,8 +196,8 @@ final class QualityDialog {
         lv.setOnChildClickListener(new ExpandableListView.OnChildClickListener() {
             public boolean onChildClick(ExpandableListView l, View v, int gp, int cp, long id) {
                 Group g = groups.get(gp);
-                a.queueOpt(g.opts.get(cp), g.name);
                 dlg.dismiss();
+                choose(a, g.opts.get(cp), g.name);
                 return true;
             }
         });
