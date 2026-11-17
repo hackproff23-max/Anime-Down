@@ -125,7 +125,7 @@ public class MainActivity extends Activity {
             }
 
             @Override public void doUpdateVisitedHistory(WebView v, String u, boolean isReload) {
-                saveLast(u);
+                onVisited(u);
             }
         });
 
@@ -641,12 +641,74 @@ public class MainActivity extends Activity {
         Toast.makeText(this, "Download iniciado. Acompanhe na barra abaixo ou no botão ☰", Toast.LENGTH_SHORT).show();
     }
 
+    // ------------------------------------------------ botão voltar (pilha própria)
+
+    String backFrom, backTarget;
+    long backAt;
+
+    /** Mantém a pilha de páginas: empilha ao navegar e desempilha ao voltar. */
+    void onVisited(final String u) {
+        saveLast(u);
+        if (u == null) return;
+        if (u.startsWith("file:")) {
+            Store.saveStack(this, new ArrayList<String>());
+            return;
+        }
+        if (!(u.startsWith("http://") || u.startsWith("https://"))) return;
+        List<String> st = Store.stack(this);
+        int n = st.size();
+
+        // a página para a qual voltamos redirecionou de novo para onde estávamos: pula ela
+        if (backFrom != null && u.equals(backFrom) && System.currentTimeMillis() - backAt < 3000
+                && n >= 1 && st.get(n - 1).equals(backTarget)) {
+            st.remove(n - 1);
+            if (!st.isEmpty()) {
+                final String prev = st.get(st.size() - 1);
+                backFrom = backTarget;
+                backTarget = prev;
+                backAt = System.currentTimeMillis();
+                Store.saveStack(this, st);
+                scanHandler.post(new Runnable() {
+                    public void run() { web.loadUrl(prev); }
+                });
+                return;
+            }
+        }
+
+        if (n > 0 && st.get(n - 1).equals(u)) return;
+        if (n > 1 && st.get(n - 2).equals(u)) {
+            st.remove(n - 1);
+        } else {
+            st.add(u);
+            while (st.size() > Store.MAX_STACK) st.remove(0);
+        }
+        Store.saveStack(this, st);
+    }
+
+    /** Volta para a página anterior. Retorna false se não há mais para onde voltar. */
+    boolean goBackOwn() {
+        List<String> st = Store.stack(this);
+        int n = st.size();
+        if (n >= 2) {
+            backFrom = st.get(n - 1);
+            backTarget = st.get(n - 2);
+            backAt = System.currentTimeMillis();
+            web.loadUrl(backTarget);
+            return true;
+        }
+        String cur = web.getUrl();
+        if (cur != null && cur.startsWith("http")) {
+            backFrom = null;
+            web.loadUrl(HOME);
+            return true;
+        }
+        return false;
+    }
+
     @Override public void onBackPressed() {
         if (customView != null) {
             chrome.onHideCustomView();
-        } else if (web.canGoBack()) {
-            web.goBack();
-        } else {
+        } else if (!goBackOwn()) {
             super.onBackPressed();
         }
     }

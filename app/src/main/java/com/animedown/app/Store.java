@@ -118,4 +118,24 @@ final class Store {
     static void clearHistory(Context c) {
         sp(c).edit().remove(HIST).apply();
     }
+
+    // ------------------------------------------------ pilha de navegação (botão voltar)
+
+    static final int MAX_STACK = 100;
+
+    static List<String> stack(Context c) {
+        List<String> out = new ArrayList<>();
+        try {
+            JSONArray a = new JSONArray(sp(c).getString("stack", "[]"));
+            for (int i = 0; i < a.length(); i++) out.add(a.getString(i));
+        } catch (Exception ignored) {
+        }
+        return out;
+    }
+
+    static void saveStack(Context c, List<String> l) {
+        JSONArray a = new JSONArray();
+        for (String u : l) a.put(u);
+        sp(c).edit().putString("stack", a.toString()).apply();
+    }
 }
