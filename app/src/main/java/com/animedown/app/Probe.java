@@ -28,6 +28,7 @@ final class Probe {
         }
     }
 
+    /** Quando o servidor não informa o tamanho no teste de trecho, lê o cabeçalho do arquivo inteiro (sem baixar). */
     static long lengthNoRange(Net net, String url) {
         try {
             HttpURLConnection c = net.open(url, null);
@@ -39,14 +40,17 @@ final class Probe {
         }
     }
 
-&
-&
+    static List<Opt> run(final Net net, String url) throws Exception {
+        List<Opt> out = new ArrayList<>();
+
+        // links do YouTube trazem qualidade e tamanho no próprio endereço
         Opt yt = YtInfo.parse(url);
         if (yt != null) {
             if (yt.size <= 0) yt.size = lengthNoRange(net, url);
             out.add(yt);
             return out;
         }
+
         boolean hls = Downloader.isHls(url);
         if (!hls) {
             Opt direct = null;
@@ -65,11 +69,13 @@ final class Probe {
                         size = c.getContentLengthLong();
                     }
                     if (size <= 0) size = lengthNoRange(net, url);
-&
+                    Opt o = new Opt();
                     o.url = url;
                     o.size = size;
                     o.height = guessHeight(url);
                     o.label = o.height > 0 ? o.height + "p" : "Original";
+                    // sem a resolução no link: lê do próprio vídeo
+                    MediaInfo.fill(net, o);
                     direct = o;
                 }
             } finally {
@@ -116,6 +122,8 @@ final class Probe {
                 } catch (Exception ignored) {
                 }
             }
+            // sem a resolução no link: lê do próprio vídeo
+            MediaInfo.fill(net, o);
             out.add(o);
         }
         return out;
