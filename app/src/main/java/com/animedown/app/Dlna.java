@@ -78,12 +78,48 @@ final class Dlna {
         }
     }
 
+    static volatile String lastLog = "";
+
+    static NetworkInterface wifiIface() {
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (ni.isUp() && !ni.isLoopback() && ni.supportsMulticast() && ni.getName().startsWith("wlan")) return ni;
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** Lê uma resposta/anúncio SSDP: guarda o LOCATION e anota no diagnóstico. */
+    static void collect(DatagramPacket p, Set<String> locations, Set<String> logged, StringBuilder log) {
+        try {
+            String r = new String(p.getData(), 0, p.getLength(), "UTF-8");
+            String loc = null, st = "", server = "", nts = "";
+            for (String line : r.split("\r\n")) {
+                String l = line.toLowerCase();
+                if (l.startsWith("location:")) loc = line.substring(9).trim();
+                else if (l.startsWith("st:") || l.startsWith("nt:")) st = line.substring(line.indexOf(':') + 1).trim();
+                else if (l.startsWith("server:")) server = line.substring(7).trim();
+                else if (l.startsWith("nts:")) nts = line.substring(4).trim();
+            }
+            if (nts.contains("byebye")) return;
+            String ip = p.getAddress().getHostAddress();
+            if (loc != null) locations.add(loc);
+            if (logged.size() < 40 && logged.add(ip + "|" + st)) {
+                log.append("\u2022 ").append(ip).append("  ").append(st.replace("urn:schemas-upnp-org:", ""))
+                        .append(server.isEmpty() ? "" : "  [" + server + "]").append("\n");
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     static void discover(final Context ctx, final int ms, final Callback cb) {
         new Thread(new Runnable() {
             public void run() {
                 List<Device> out = new ArrayList<>();
+                StringBuilder log = new StringBuilder();
                 WifiManager.MulticastLock lock = null;
-                MulticastSocket sock = null;
+                MulticastSocket sock = null, listen = null;
                 try {
                     WifiManager wm = (WifiManager) ctx.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
                     if (wm != null) {
@@ -91,11 +127,32 @@ final class Dlna {
                         lock.setReferenceCounted(false);
                         lock.acquire();
                     }
+                    NetworkInterface wi = wifiIface();
+                    log.append("Wi-Fi: ").append(wi == null ? "interface wlan n\u00e3o encontrada" : wi.getName())
+                            .append("  ").append(String.valueOf(localIp())).append("\n");
+
                     sock = new MulticastSocket();
-                    sock.setSoTimeout(400);
+                    sock.setSoTimeout(250);
                     sock.setTimeToLive(4);
                     bindToWifi(ctx, sock);
+
                     InetAddress group = InetAddress.getByName("239.255.255.250");
+                    // escuta os an\u00fancios (NOTIFY) que os aparelhos mandam sozinhos no grupo multicast
+                    try {
+                        listen = new MulticastSocket(null);
+                        listen.setReuseAddress(true);
+                        listen.bind(new java.net.InetSocketAddress(1900));
+                        listen.setSoTimeout(100);
+                        if (wi != null) listen.joinGroup(new java.net.InetSocketAddress(group, 1900), wi);
+                        else listen.joinGroup(group);
+                    } catch (Exception e) {
+                        log.append("sem escuta de an\u00fancios: ").append(e.getClass().getSimpleName()).append("\n");
+                        if (listen != null) {
+                            listen.close();
+                            listen = null;
+                        }
+                    }
+
                     String[] targets = {
                             "ssdp:all",
                             "upnp:rootdevice",
@@ -103,6 +160,7 @@ final class Dlna {
                             "urn:schemas-upnp-org:service:AVTransport:1"
                     };
                     Set<String> locations = new LinkedHashSet<>();
+                    Set<String> logged = new LinkedHashSet<>();
                     long end = System.currentTimeMillis() + ms;
                     long nextSend = 0;
                     byte[] buf = new byte[4096];
@@ -113,48 +171,63 @@ final class Dlna {
                                     String m = "M-SEARCH * HTTP/1.1\r\n"
                                             + "HOST: 239.255.255.250:1900\r\n"
                                             + "MAN: \"ssdp:discover\"\r\n"
-                                            + "MX: 2\r\n"
-                                            + "ST: " + st + "\r\n\r\n";
+                                            + "MX: 3\r\n"
+                                            + "ST: " + st + "\r\n"
+                                            + "USER-AGENT: Android/1.0 UPnP/1.0 AnimeDown/2.0\r\n\r\n";
                                     byte[] b = m.getBytes("UTF-8");
                                     sock.send(new DatagramPacket(b, b.length, group, 1900));
                                 } catch (IOException ignored) {
                                 }
                             }
-                            nextSend = System.currentTimeMillis() + 1500;
+                            nextSend = System.currentTimeMillis() + 2000;
                         }
                         try {
                             DatagramPacket p = new DatagramPacket(buf, buf.length);
                             sock.receive(p);
-                            String r = new String(p.getData(), 0, p.getLength(), "UTF-8");
-                            for (String line : r.split("\r\n")) {
-                                if (line.toLowerCase().startsWith("location:")) {
-                                    locations.add(line.substring(9).trim());
-                                }
-                            }
+                            collect(p, locations, logged, log);
                         } catch (SocketTimeoutException ignored) {
                         }
+                        if (listen != null) {
+                            try {
+                                DatagramPacket p = new DatagramPacket(buf, buf.length);
+                                listen.receive(p);
+                                collect(p, locations, logged, log);
+                            } catch (SocketTimeoutException ignored) {
+                            }
+                        }
                     }
+                    if (locations.isEmpty()) log.append("Nenhuma resposta SSDP chegou ao celular.\n");
+
                     ExecutorService ex = Executors.newFixedThreadPool(6);
+                    List<String> locs = new ArrayList<>(locations);
                     List<Future<Device>> fs = new ArrayList<>();
-                    for (final String loc : locations) {
+                    for (final String loc : locs) {
                         fs.add(ex.submit(new Callable<Device>() {
                             public Device call() throws Exception { return describe(loc); }
                         }));
                     }
                     Set<String> seen = new LinkedHashSet<>();
-                    for (Future<Device> f : fs) {
+                    for (int i = 0; i < fs.size(); i++) {
                         try {
-                            Device d = f.get(6, TimeUnit.SECONDS);
-                            if (d != null && seen.add(d.controlUrl)) out.add(d);
-                        } catch (Exception ignored) {
+                            Device d = fs.get(i).get(6, TimeUnit.SECONDS);
+                            if (d == null) {
+                                log.append("sem AVTransport: ").append(locs.get(i)).append("\n");
+                            } else if (seen.add(d.controlUrl)) {
+                                out.add(d);
+                            }
+                        } catch (Exception e) {
+                            log.append("erro ao ler ").append(locs.get(i)).append("\n");
                         }
                     }
                     ex.shutdownNow();
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    log.append("erro: ").append(e).append("\n");
                 } finally {
                     if (sock != null) sock.close();
+                    if (listen != null) listen.close();
                     if (lock != null && lock.isHeld()) lock.release();
                 }
+                lastLog = log.toString();
                 cb.onResult(out);
             }
         }).start();

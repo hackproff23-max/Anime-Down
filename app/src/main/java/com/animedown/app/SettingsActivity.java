@@ -324,7 +324,7 @@ public class SettingsActivity extends Activity {
                         if (devs.isEmpty()) {
                             new AlertDialog.Builder(SettingsActivity.this)
                                     .setTitle("Nenhuma TV encontrada")
-                                    .setMessage("Confira se o celular e a TV estão no mesmo Wi-Fi e se o DLNA / compartilhamento de mídia está ligado na TV.")
+                                    .setMessage("Confira se o celular e a TV estão no mesmo Wi-Fi e se o DLNA / compartilhamento de mídia está ligado na TV.\n\nDiagnóstico:\n" + Dlna.lastLog)
                                     .setPositiveButton("OK", null).show();
                             return;
                         }
