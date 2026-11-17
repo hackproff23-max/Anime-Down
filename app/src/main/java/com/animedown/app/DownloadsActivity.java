@@ -134,7 +134,10 @@ public class DownloadsActivity extends Activity {
 
     void actions(final Item it) {
         final List<String> o = new ArrayList<>();
-        if (it.status == Item.DONE) o.add("Abrir");
+        if (it.status == Item.DONE) {
+            o.add("Abrir");
+            o.add("Transmitir para TV (DLNA)");
+        }
         if (it.status == Item.RUNNING || it.status == Item.QUEUED) o.add("Pausar");
         if (it.status == Item.PAUSED || it.status == Item.ERROR) {
             o.add("Continuar");
@@ -149,6 +152,7 @@ public class DownloadsActivity extends Activity {
                     public void onClick(DialogInterface d, int w) {
                         String a = o.get(w);
                         if (a.equals("Abrir")) open(it);
+                        else if (a.startsWith("Transmitir")) cast(it);
                         else if (a.equals("Pausar")) Dl.pause(it);
                         else if (a.equals("Continuar") || a.equals("Baixar de novo")) Dl.start(it);
                         else if (a.startsWith("Atualizar")) updateLink(it);
@@ -156,6 +160,56 @@ public class DownloadsActivity extends Activity {
                         else Dl.remove(it);
                     }
                 }).show();
+    }
+
+    // ------------------------------------------------ transmitir para TV (DLNA)
+
+    void cast(final Item it) {
+        Toast.makeText(this, "Procurando TVs no Wi-Fi…", Toast.LENGTH_SHORT).show();
+        Dlna.discover(this, 4000, new Dlna.Callback() {
+            public void onResult(final List<Dlna.Device> devs) {
+                runOnUiThread(new Runnable() {
+                    public void run() { pickTv(it, devs); }
+                });
+            }
+        });
+    }
+
+    void pickTv(final Item it, final List<Dlna.Device> devs) {
+        if (devs.isEmpty()) {
+            Toast.makeText(this,
+                    "Nenhuma TV encontrada. Confira se o celular e a TV estão no mesmo Wi-Fi e se o DLNA / compartilhamento de mídia está ligado na TV.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        String[] names = new String[devs.size()];
+        for (int i = 0; i < names.length; i++) names[i] = devs.get(i).name;
+        new AlertDialog.Builder(this)
+                .setTitle("Transmitir para…")
+                .setItems(names, new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) { startCast(it, devs.get(w)); }
+                })
+                .setNegativeButton("Fechar", null)
+                .show();
+    }
+
+    void startCast(final Item it, final Dlna.Device d) {
+        Toast.makeText(this, "Enviando para " + d.name + "…", Toast.LENGTH_SHORT).show();
+        new Thread(new Runnable() {
+            public void run() {
+                String msg;
+                try {
+                    Dlna.cast(getApplicationContext(), d, Uri.parse(it.outUri), it.name);
+                    msg = "Tocando em " + d.name + ". Mantenha o app aberto durante a transmissão.";
+                } catch (Exception e) {
+                    msg = "Não consegui transmitir: " + e.getMessage();
+                }
+                final String m = msg;
+                runOnUiThread(new Runnable() {
+                    public void run() { Toast.makeText(DownloadsActivity.this, m, Toast.LENGTH_LONG).show(); }
+                });
+            }
+        }).start();
     }
 
     void updateLink(final Item it) {
