@@ -568,6 +568,10 @@ public class MainActivity extends Activity {
     // ------------------------------------------------ qualidades e tamanhos
 
     void showQuality(final List<String> urls, final String nameOverride) {
+        QualityDialog.show(this, urls, nameOverride);
+    }
+
+    void showQualityLegacy(final List<String> urls, final String nameOverride) {
         final List<Probe.Opt> shown = new ArrayList<>();
         final Map<String, List<Probe.Opt>> results = new LinkedHashMap<>();
         final int[] pending = {urls.size()};
