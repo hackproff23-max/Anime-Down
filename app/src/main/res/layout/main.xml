@@ -38,6 +38,14 @@
                 android:text="Ir" />
 
             <Button
+                android:id="@+id/btnMenu"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="44dp"
+                android:text="★" />
+
+            <Button
                 android:id="@+id/btnDirect"
                 style="?android:attr/borderlessButtonStyle"
                 android:layout_width="wrap_content"

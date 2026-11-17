@@ -25,6 +25,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -46,6 +47,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
+    static final String HOME = "file:///android_asset/home.html";
+
     WebView web;
     EditText urlBar;
     ProgressBar bar;
@@ -114,6 +117,14 @@ public class MainActivity extends Activity {
                 updateFound();
                 if (u != null && !u.startsWith("file:")) urlBar.setText(u); else urlBar.setText("");
             }
+
+            @Override public void onPageFinished(WebView v, String u) {
+                Store.addHistory(MainActivity.this, v.getTitle(), u);
+            }
+
+            @Override public void doUpdateVisitedHistory(WebView v, String u, boolean isReload) {
+                saveLast(u);
+            }
         });
 
         chrome = new WebChromeClient() {
@@ -145,7 +156,7 @@ public class MainActivity extends Activity {
         web.setWebChromeClient(chrome);
 
         web.setDownloadListener(new android.webkit.DownloadListener() {
-            @Override public void onDownloadStart(final String url, String ua, String cd, String mime, long len) {
+            @Override public void onDownloadStart(final String url, String ua, String cd, String mime, final long len) {
                 final String name = URLUtil.guessFileName(url, cd, mime);
                 new AlertDialog.Builder(MainActivity.this)
                         .setTitle("Baixar arquivo?")
@@ -188,6 +199,9 @@ public class MainActivity extends Activity {
         findViewById(R.id.btnList).setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { openDownloads(); }
         });
+        findViewById(R.id.btnMenu).setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { showMenu(); }
+        });
         activeBox.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { openDownloads(); }
         });
@@ -208,10 +222,24 @@ public class MainActivity extends Activity {
         if (!perms.isEmpty()) requestPermissions(perms.toArray(new String[0]), 1);
 
         if (b == null) {
-            if (!handleIntent(getIntent())) web.loadUrl("file:///android_asset/home.html");
-        } else {
-            web.restoreState(b);
+            if (!handleIntent(getIntent())) loadLastOrHome();
+        } else if (web.restoreState(b) == null) {
+            loadLastOrHome();
         }
+    }
+
+    /** Abre a última página visitada; se não houver, abre a tela inicial. */
+    void loadLastOrHome() {
+        String last = Store.last(this);
+        if (last != null && last.startsWith("http")) web.loadUrl(last);
+        else web.loadUrl(HOME);
+    }
+
+    /** Guarda a página atual para reabrir nela da próxima vez. */
+    void saveLast(String u) {
+        if (u == null) return;
+        if (u.startsWith("http://") || u.startsWith("https://")) Store.setLast(this, u);
+        else if (u.startsWith("file:")) Store.setLast(this, "");
     }
 
     @Override protected void onResume() {
@@ -222,6 +250,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onPause() {
         Dl.listeners.remove(activeListener);
+        saveLast(web.getUrl());
         super.onPause();
     }
 
@@ -273,11 +302,91 @@ public class MainActivity extends Activity {
         String u;
         if (in.matches("(?i)^https?://\\S+$")) u = in;
         else if (!in.contains(" ") && in.contains(".")) u = "https://" + in;
-        else u = "https://duckduckgo.com/?q=" + Uri.encode(in);
+        else u = "https://www.google.com/search?q=" + Uri.encode(in);
         web.loadUrl(u);
         InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         imm.hideSoftInputFromWindow(urlBar.getWindowToken(), 0);
         web.requestFocus();
+    }
+
+    // ------------------------------------------------ favoritos e histórico
+
+    void showMenu() {
+        final String u = web.getUrl();
+        final boolean page = u != null && (u.startsWith("http://") || u.startsWith("https://"));
+        final boolean fav = page && Store.isFav(this, u);
+        List<String> items = new ArrayList<>();
+        if (page) items.add(fav ? "★  Remover dos favoritos" : "☆  Adicionar aos favoritos");
+        items.add("Favoritos");
+        items.add("Histórico");
+        final int off = page ? 1 : 0;
+        new AlertDialog.Builder(this)
+                .setItems(items.toArray(new String[0]), new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int which) {
+                        if (page && which == 0) {
+                            boolean now = Store.toggleFav(MainActivity.this, web.getTitle(), u);
+                            Toast.makeText(MainActivity.this,
+                                    now ? "Adicionado aos favoritos" : "Removido dos favoritos",
+                                    Toast.LENGTH_SHORT).show();
+                        } else if (which - off == 0) {
+                            showList(true);
+                        } else {
+                            showList(false);
+                        }
+                    }
+                })
+                .setNegativeButton("Fechar", null)
+                .show();
+    }
+
+    void showList(final boolean fav) {
+        final String key = fav ? Store.FAV : Store.HIST;
+        final List<Store.Entry> data = Store.list(this, key);
+        if (data.isEmpty()) {
+            Toast.makeText(this, fav ? "Nenhum favorito ainda" : "Histórico vazio", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final ArrayAdapter<Store.Entry> ad = new ArrayAdapter<Store.Entry>(this,
+                android.R.layout.simple_list_item_2, android.R.id.text1, data) {
+            @Override public View getView(int i, View v, ViewGroup p) {
+                if (v == null) v = LayoutInflater.from(getContext()).inflate(android.R.layout.simple_list_item_2, p, false);
+                Store.Entry e = getItem(i);
+                TextView t1 = (TextView) v.findViewById(android.R.id.text1);
+                TextView t2 = (TextView) v.findViewById(android.R.id.text2);
+                t1.setText(e.title == null || e.title.isEmpty() ? e.url : e.title);
+                t1.setSingleLine(true);
+                t2.setText(e.url);
+                t2.setSingleLine(true);
+                return v;
+            }
+        };
+        AlertDialog.Builder bld = new AlertDialog.Builder(this)
+                .setTitle(fav ? "Favoritos (segure para remover)" : "Histórico (segure para remover)")
+                .setAdapter(ad, new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int which) {
+                        web.loadUrl(data.get(which).url);
+                    }
+                })
+                .setNegativeButton("Fechar", null);
+        if (!fav) {
+            bld.setNeutralButton("Limpar tudo", new DialogInterface.OnClickListener() {
+                public void onClick(DialogInterface d, int w) {
+                    Store.clearHistory(MainActivity.this);
+                    Toast.makeText(MainActivity.this, "Histórico apagado", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+        final AlertDialog dlg = bld.create();
+        dlg.show();
+        dlg.getListView().setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
+            public boolean onItemLongClick(AdapterView<?> a, View v, int pos, long id) {
+                data.remove(pos);
+                Store.save(MainActivity.this, key, data);
+                ad.notifyDataSetChanged();
+                if (data.isEmpty()) dlg.dismiss();
+                return true;
+            }
+        });
     }
 
     static boolean isMedia(Uri u) {
