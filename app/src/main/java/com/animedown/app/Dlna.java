@@ -2,6 +2,9 @@ package com.animedown.app;
 
 import android.content.ContentResolver;
 import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.ParcelFileDescriptor;
@@ -27,7 +30,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,6 +52,32 @@ final class Dlna {
 
     // ------------------------------------------------ descoberta (SSDP)
 
+    /** Prende o socket à rede Wi-Fi (e à interface wlan), para o multicast não sair pelos dados móveis. */
+    static void bindToWifi(Context ctx, MulticastSocket sock) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) ctx.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                for (Network n : cm.getAllNetworks()) {
+                    NetworkCapabilities nc = cm.getNetworkCapabilities(n);
+                    if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                        n.bindSocket(sock);
+                        break;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (ni.isUp() && !ni.isLoopback() && ni.supportsMulticast() && ni.getName().startsWith("wlan")) {
+                    sock.setNetworkInterface(ni);
+                    break;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     static void discover(final Context ctx, final int ms, final Callback cb) {
         new Thread(new Runnable() {
             public void run() {
@@ -59,8 +93,12 @@ final class Dlna {
                     }
                     sock = new MulticastSocket();
                     sock.setSoTimeout(400);
+                    sock.setTimeToLive(4);
+                    bindToWifi(ctx, sock);
                     InetAddress group = InetAddress.getByName("239.255.255.250");
                     String[] targets = {
+                            "ssdp:all",
+                            "upnp:rootdevice",
                             "urn:schemas-upnp-org:device:MediaRenderer:1",
                             "urn:schemas-upnp-org:service:AVTransport:1"
                     };
@@ -71,13 +109,16 @@ final class Dlna {
                     while (System.currentTimeMillis() < end) {
                         if (System.currentTimeMillis() >= nextSend) {
                             for (String st : targets) {
-                                String m = "M-SEARCH * HTTP/1.1\r\n"
-                                        + "HOST: 239.255.255.250:1900\r\n"
-                                        + "MAN: \"ssdp:discover\"\r\n"
-                                        + "MX: 2\r\n"
-                                        + "ST: " + st + "\r\n\r\n";
-                                byte[] b = m.getBytes("UTF-8");
-                                sock.send(new DatagramPacket(b, b.length, group, 1900));
+                                try {
+                                    String m = "M-SEARCH * HTTP/1.1\r\n"
+                                            + "HOST: 239.255.255.250:1900\r\n"
+                                            + "MAN: \"ssdp:discover\"\r\n"
+                                            + "MX: 2\r\n"
+                                            + "ST: " + st + "\r\n\r\n";
+                                    byte[] b = m.getBytes("UTF-8");
+                                    sock.send(new DatagramPacket(b, b.length, group, 1900));
+                                } catch (IOException ignored) {
+                                }
                             }
                             nextSend = System.currentTimeMillis() + 1500;
                         }
@@ -93,14 +134,22 @@ final class Dlna {
                         } catch (SocketTimeoutException ignored) {
                         }
                     }
+                    ExecutorService ex = Executors.newFixedThreadPool(6);
+                    List<Future<Device>> fs = new ArrayList<>();
+                    for (final String loc : locations) {
+                        fs.add(ex.submit(new Callable<Device>() {
+                            public Device call() throws Exception { return describe(loc); }
+                        }));
+                    }
                     Set<String> seen = new LinkedHashSet<>();
-                    for (String loc : locations) {
+                    for (Future<Device> f : fs) {
                         try {
-                            Device d = describe(loc);
+                            Device d = f.get(6, TimeUnit.SECONDS);
                             if (d != null && seen.add(d.controlUrl)) out.add(d);
                         } catch (Exception ignored) {
                         }
                     }
+                    ex.shutdownNow();
                 } catch (Exception ignored) {
                 } finally {
                     if (sock != null) sock.close();
@@ -128,6 +177,15 @@ final class Dlna {
         Matcher nm = Pattern.compile("<friendlyName>(.*?)</friendlyName>", Pattern.DOTALL).matcher(xml);
         String name = nm.find() ? unesc(nm.group(1).trim()) : "TV";
 
+        URL base = new URL(location);
+        Matcher bm = Pattern.compile("<URLBase>(.*?)</URLBase>", Pattern.DOTALL).matcher(xml);
+        if (bm.find()) {
+            try {
+                base = new URL(bm.group(1).trim());
+            } catch (Exception ignored) {
+            }
+        }
+
         Matcher sm = Pattern.compile("<service>(.*?)</service>", Pattern.DOTALL).matcher(xml);
         while (sm.find()) {
             String block = sm.group(1);
@@ -137,7 +195,7 @@ final class Dlna {
                 Device d = new Device();
                 d.name = name;
                 d.serviceType = tm.group(1).trim();
-                d.controlUrl = new URL(new URL(location), um.group(1).trim()).toString();
+                d.controlUrl = new URL(base, um.group(1).trim()).toString();
                 return d;
             }
         }
