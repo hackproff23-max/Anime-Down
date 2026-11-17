@@ -89,6 +89,7 @@ public class MainActivity extends Activity {
             }
         });
 
+        findViewById(R.id.btnTv).setOnClickListener(new View.OnClickListener() { public void onClick(View v) { startActivity(new Intent(MainActivity.this, TvActivity.class)); } });
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
