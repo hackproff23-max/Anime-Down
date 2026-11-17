@@ -54,7 +54,7 @@ public class SettingsActivity extends Activity {
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
         ImageView logo = new ImageView(this);
-        logo.setImageResource(R.drawable.logo_frm);
+        logo.setImageResource(R.drawable.logo_anime);
         head.addView(logo, new LinearLayout.LayoutParams(Thm.dp(this, 64), Thm.dp(this, 64)));
         LinearLayout ht = new LinearLayout(this);
         ht.setOrientation(LinearLayout.VERTICAL);
@@ -128,7 +128,7 @@ public class SettingsActivity extends Activity {
         LinearLayout logos = new LinearLayout(this);
         logos.setGravity(Gravity.CENTER);
         ImageView l1 = new ImageView(this);
-        l1.setImageResource(R.drawable.logo_frm);
+        l1.setImageResource(R.drawable.wolf_shadow);
         logos.addView(l1, new LinearLayout.LayoutParams(Thm.dp(this, 96), Thm.dp(this, 96)));
         TextView plus = text("  +  ", 22, 0xFF9A9AB0, true);
         logos.addView(plus);

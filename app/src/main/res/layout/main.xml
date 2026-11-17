@@ -23,8 +23,8 @@
             <ImageView
                 android:layout_width="32dp"
                 android:layout_height="32dp"
-                android:contentDescription="FRM"
-                android:src="@drawable/logo_frm_small" />
+                android:contentDescription="Anime-Down"
+                android:src="@drawable/logo_anime_small" />
 
             <TextView
                 android:id="@+id/brandTitle"
