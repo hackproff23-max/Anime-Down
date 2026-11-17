@@ -7,9 +7,9 @@ import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 
-import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -20,11 +20,18 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -32,155 +39,201 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+/**
+ * Baixa em partes (blocos de arquivo ou segmentos HLS) com várias conexões em paralelo.
+ * Cada parte concluída fica salva em disco, então dá para pausar, continuar e até trocar o link
+ * sem recomeçar do zero.
+ */
 final class Downloader implements Runnable {
-    static class Canceled extends IOException { }
-
-    static class Seg { String url, key, iv; long seq; }
-
-    private static final String DEFAULT_UA =
-            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36";
+    static class Piece {
+        int idx;
+        String url;                 // null = usa it.url (arquivo único)
+        long start = -1, end = -1;  // intervalo de bytes (blocos)
+        long size = -1;
+        String key, iv;
+        long seq;
+    }
 
     final Context ctx;
     final Item it;
+    final Map<String, byte[]> keys = new ConcurrentHashMap<>();
 
     Downloader(Context c, Item i) { ctx = c; it = i; }
 
     @Override public void run() {
-        File tmp = new File(ctx.getFilesDir(), it.id + ".part");
+        if (!it.running.compareAndSet(false, true)) return;
+        File dir = Dl.dir(it);
         try {
-            if (it.cancel) throw new Canceled();
+            if (it.stop != 0) throw new Net.Stop();
             it.status = Item.RUNNING;
-            it.msg = "";
-            it.done = 0;
-            it.total = 0;
+            it.msg = "Preparando…";
+            it.speed = 0;
             Dl.changed();
-            String ext = isHls(it.url) ? hls(tmp) : http(tmp);
-            if (it.cancel) throw new Canceled();
-            it.name = safe(stripExt(it.name)) + "." + ext;
-            it.outUri = publish(tmp, it.name, mime(ext));
+            dir.mkdirs();
+            Net net = new Net(it.ua, it.referer, it.cookie, it.url, it);
+            List<Piece> pieces = plan(net, dir);
+            it.msg = "";
+            download(net, pieces, dir);
+
+            it.msg = "Finalizando…";
+            Dl.ui();
+            String fname = safe(stripExt(it.name)) + "." + it.ext;
+            List<File> files = new ArrayList<>();
+            for (Piece p : pieces) files.add(pf(dir, p.idx));
+            it.outUri = publish(files, fname, mime(it.ext));
+            it.name = fname;
+            it.msg = "";
             it.status = Item.DONE;
-        } catch (Canceled e) {
-            it.status = Item.CANCELED;
+            it.pieceDone = it.pieceTotal;
+            if (!it.hls && it.total > 0) it.done = it.total;
+            Dl.deleteDir(dir);
+        } catch (Net.Stop e) {
+            finishStopped(dir);
         } catch (Throwable e) {
-            if (it.cancel) {
-                it.status = Item.CANCELED;
+            if (it.stop != 0) {
+                finishStopped(dir);
             } else {
                 it.status = Item.ERROR;
                 it.msg = e.getMessage() != null ? e.getMessage() : e.toString();
             }
         } finally {
-            tmp.delete();
+            it.speed = 0;
+            it.running.set(false);
             Dl.changed();
         }
     }
 
-    // ---------- HTTP ----------
+    void finishStopped(File dir) {
+        it.msg = "";
+        if (it.stop == 2) {
+            it.status = Item.CANCELED;
+            Dl.deleteDir(dir);
+        } else {
+            it.status = Item.PAUSED;
+        }
+    }
 
-    String http(File tmp) throws Exception {
-        HttpURLConnection c = open(it.url);
-        try {
-            String ct = c.getContentType();
-            ct = ct == null ? "" : ct.toLowerCase();
-            if (ct.contains("mpegurl")) {
-                c.disconnect();
-                return hls(tmp);
-            }
-            if (ct.startsWith("text/")) {
-                throw new IOException("O link não retornou um vídeo (veio uma página). Abra o vídeo no navegador do app e use \"Vídeos detectados\".");
-            }
-            long len = c.getContentLengthLong();
-            it.total = len > 0 ? len : 0;
-            it.hls = false;
-            try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(tmp)) {
-                byte[] b = new byte[65536];
-                int n;
-                while ((n = in.read(b)) != -1) {
-                    if (it.cancel) throw new Canceled();
-                    out.write(b, 0, n);
-                    it.done += n;
-                    Dl.progress(it);
+    // ---------------------------------------------------------------- plano
+
+    List<Piece> plan(Net net, File dir) throws Exception {
+        boolean hls = isHls(it.url);
+        if (!hls) {
+            HttpURLConnection c = net.open(it.url, "bytes=0-0");
+            String ct = "";
+            long total = -1;
+            boolean ranged = false;
+            try {
+                ct = c.getContentType();
+                ct = ct == null ? "" : ct.toLowerCase();
+                if (ct.contains("mpegurl")) {
+                    hls = true;
+                } else {
+                    if (ct.startsWith("text/")) {
+                        throw new IOException("O link não retornou um vídeo (veio uma página). Abra o vídeo no navegador do app e use \"Vídeos detectados\".");
+                    }
+                    if (c.getResponseCode() == 206) {
+                        total = Probe.totalFromRange(c.getHeaderField("Content-Range"));
+                        ranged = total > 0;
+                    } else {
+                        total = c.getContentLengthLong();
+                    }
                 }
-            }
-            return extFor(it.url, ct);
-        } finally {
-            c.disconnect();
-        }
-    }
-
-    HttpURLConnection open(String u) throws IOException {
-        String cur = u;
-        String origHost = new URL(it.url).getHost();
-        for (int i = 0; i < 6; i++) {
-            URL url = new URL(cur);
-            HttpURLConnection c = (HttpURLConnection) url.openConnection();
-            c.setConnectTimeout(15000);
-            c.setReadTimeout(30000);
-            c.setInstanceFollowRedirects(false);
-            c.setRequestProperty("User-Agent", it.ua.isEmpty() ? DEFAULT_UA : it.ua);
-            c.setRequestProperty("Accept-Encoding", "identity");
-            if (!it.referer.isEmpty()) c.setRequestProperty("Referer", it.referer);
-            if (!it.cookie.isEmpty() && url.getHost().equals(origHost)) c.setRequestProperty("Cookie", it.cookie);
-            int code = c.getResponseCode();
-            if (code >= 300 && code < 400) {
-                String loc = c.getHeaderField("Location");
+            } finally {
                 c.disconnect();
-                if (loc == null) throw new IOException("Redirecionamento inválido");
-                cur = new URL(url, loc).toString();
-                continue;
             }
-            if (code >= 200 && code < 300) return c;
-            c.disconnect();
-            throw new IOException("HTTP " + code);
+            if (!hls) return planHttp(ct, total, ranged, dir);
         }
-        throw new IOException("Redirecionamentos demais");
+        return planHls(net, dir);
     }
 
-    byte[] bytes(String u) throws IOException {
-        HttpURLConnection c = open(u);
-        try (InputStream in = c.getInputStream()) {
-            ByteArrayOutputStream o = new ByteArrayOutputStream();
-            byte[] b = new byte[32768];
-            int n;
-            while ((n = in.read(b)) != -1) {
-                if (it.cancel) throw new Canceled();
-                o.write(b, 0, n);
-            }
-            return o.toByteArray();
-        } finally {
-            c.disconnect();
+    List<Piece> planHttp(String ct, long total, boolean ranged, File dir) throws IOException {
+        boolean had = hasParts(dir);
+        if (had && it.hls) { wipe(dir); had = false; }
+        if (had && it.total > 0 && total > 0 && it.total != total) {
+            throw new IOException("O novo link é de um arquivo com tamanho diferente (" + Fmt.size(it.total)
+                    + " x " + Fmt.size(total) + "). Não dá para continuar o download.");
         }
+        it.hls = false;
+        it.ext = extFor(it.url, ct);
+        List<Piece> ps = new ArrayList<>();
+        if (ranged && total > 2L * 1024 * 1024) {
+            long bs = had && it.blockSize > 0 ? it.blockSize
+                    : Math.max(1L << 20, Math.min(8L << 20, total / (Dl.threads() * 4L)));
+            it.blockSize = bs;
+            int n = (int) ((total + bs - 1) / bs);
+            for (int i = 0; i < n; i++) {
+                Piece p = new Piece();
+                p.idx = i;
+                p.start = i * bs;
+                p.end = Math.min(total - 1, p.start + bs - 1);
+                p.size = p.end - p.start + 1;
+                ps.add(p);
+            }
+        } else {
+            if (had && it.blockSize > 0) {
+                throw new IOException("O servidor do novo link não permite continuar de onde parou.");
+            }
+            it.blockSize = 0;
+            Piece p = new Piece();
+            p.idx = 0;
+            p.size = total > 0 ? total : -1;
+            ps.add(p);
+        }
+        it.total = Math.max(0, total);
+        it.pieceTotal = ps.size();
+        return ps;
     }
 
-    // ---------- HLS (.m3u8) ----------
-
-    String hls(File tmp) throws Exception {
+    List<Piece> planHls(Net net, File dir) throws Exception {
+        boolean had = hasParts(dir);
+        if (had && !it.hls) { wipe(dir); had = false; }
         String base = it.url;
-        String text = new String(bytes(base), "UTF-8");
+        String text = net.text(base);
+
         if (text.contains("#EXT-X-STREAM-INF")) {
             String best = null;
-            long bw = -1, cur = -1;
+            long bestBw = -1;
+            int bestH = 0, bestDiff = Integer.MAX_VALUE;
+            long bw = 0;
+            int h = 0;
+            boolean has = false;
             for (String raw : text.split("\\r?\\n")) {
                 String l = raw.trim();
                 if (l.startsWith("#EXT-X-STREAM-INF")) {
-                    try { cur = Long.parseLong(attr(l, "BANDWIDTH")); } catch (Exception e) { cur = 0; }
-                } else if (!l.isEmpty() && !l.startsWith("#") && cur >= 0) {
-                    if (cur > bw) { bw = cur; best = l; }
-                    cur = -1;
+                    bw = Probe.num(attr(l, "BANDWIDTH"));
+                    h = 0;
+                    String res = attr(l, "RESOLUTION");
+                    if (res != null && res.contains("x")) h = (int) Probe.num(res.substring(res.indexOf('x') + 1));
+                    has = true;
+                } else if (has && !l.isEmpty() && !l.startsWith("#")) {
+                    boolean better;
+                    if (it.height > 0 && h > 0) {
+                        int diff = Math.abs(h - it.height);
+                        better = diff < bestDiff || (diff == bestDiff && bw > bestBw);
+                        if (better) bestDiff = diff;
+                    } else if (it.height > 0) {
+                        better = best == null;
+                    } else {
+                        better = bw > bestBw;
+                    }
+                    if (better) { best = l; bestBw = bw; bestH = h; }
+                    has = false;
                 }
             }
             if (best == null) throw new IOException("Playlist HLS sem variantes");
+            if (it.height == 0 && bestH > 0) it.height = bestH;
             base = resolve(base, best);
-            text = new String(bytes(base), "UTF-8");
+            text = net.text(base);
         }
 
-        List<Seg> segs = new ArrayList<>();
+        List<Piece> segs = new ArrayList<>();
         String key = null, iv = null, map = null;
         long seq = 0;
         for (String raw : text.split("\\r?\\n")) {
             String l = raw.trim();
             if (l.isEmpty()) continue;
             if (l.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
-                try { seq = Long.parseLong(l.substring(l.indexOf(':') + 1).trim()); } catch (Exception ignored) { }
+                seq = Math.max(0, Probe.num(l.substring(l.indexOf(':') + 1)));
             } else if (l.startsWith("#EXT-X-KEY:")) {
                 String m = attr(l, "METHOD");
                 if ("NONE".equals(m)) {
@@ -197,51 +250,180 @@ final class Downloader implements Runnable {
                 String mu = attr(l, "URI");
                 if (mu != null) map = resolve(base, mu);
             } else if (!l.startsWith("#")) {
-                Seg s = new Seg();
-                s.url = resolve(base, l);
-                s.key = key;
-                s.iv = iv;
-                s.seq = seq;
-                seq++;
-                segs.add(s);
+                Piece p = new Piece();
+                p.url = resolve(base, l);
+                p.key = key;
+                p.iv = iv;
+                p.seq = seq++;
+                segs.add(p);
             }
         }
         if (segs.isEmpty()) throw new IOException("Playlist HLS vazia");
 
-        it.hls = true;
-        it.total = segs.size();
-        it.done = 0;
-        Map<String, byte[]> keys = new HashMap<>();
-        try (OutputStream out = new BufferedOutputStream(new FileOutputStream(tmp))) {
-            if (map != null) out.write(bytes(map));
-            for (Seg s : segs) {
-                byte[] d = null;
-                IOException last = null;
-                for (int t = 0; t < 3 && d == null; t++) {
-                    if (it.cancel) throw new Canceled();
-                    try {
-                        d = bytes(s.url);
-                    } catch (Canceled c) {
-                        throw c;
-                    } catch (IOException e) {
-                        last = e;
-                    }
-                }
-                if (d == null) throw last;
-                if (s.key != null) {
-                    byte[] k = keys.get(s.key);
-                    if (k == null) { k = bytes(s.key); keys.put(s.key, k); }
-                    d = decrypt(d, k, s);
-                }
-                out.write(d);
-                it.done++;
-                Dl.progress(it);
-            }
+        List<Piece> ps = new ArrayList<>();
+        if (map != null) {
+            Piece m = new Piece();
+            m.url = map;
+            ps.add(m);
         }
-        return map != null ? "mp4" : "ts";
+        ps.addAll(segs);
+        for (int i = 0; i < ps.size(); i++) ps.get(i).idx = i;
+
+        if (had && it.pieceTotal > 0 && it.pieceTotal != ps.size()) {
+            throw new IOException("A playlist nova tem " + ps.size() + " partes e a antiga tinha " + it.pieceTotal
+                    + ". Não dá para continuar; cancele e baixe de novo.");
+        }
+        it.hls = true;
+        it.ext = map != null ? "mp4" : "ts";
+        it.pieceTotal = ps.size();
+        return ps;
     }
 
-    static byte[] decrypt(byte[] d, byte[] k, Seg s) throws Exception {
+    // ------------------------------------------------------------- download
+
+    void download(final Net net, final List<Piece> pieces, final File dir) throws Exception {
+        File[] fs = dir.listFiles();
+        if (fs != null) for (File f : fs) if (f.getName().endsWith(".tmp")) f.delete();
+
+        long have = 0;
+        int doneCount = 0;
+        final ConcurrentLinkedQueue<Piece> q = new ConcurrentLinkedQueue<>();
+        for (Piece p : pieces) {
+            File f = pf(dir, p.idx);
+            if (f.exists()) { have += f.length(); doneCount++; } else q.add(p);
+        }
+        final int total = pieces.size();
+        final AtomicLong live = new AtomicLong(have);
+        final AtomicLong fin = new AtomicLong(have);
+        final AtomicInteger cnt = new AtomicInteger(doneCount);
+        final AtomicBoolean abort = new AtomicBoolean(false);
+        final AtomicReference<Throwable> err = new AtomicReference<>();
+        it.done = have;
+        it.pieceDone = doneCount;
+        it.pieceTotal = total;
+
+        int th = Dl.threads();
+        if (it.hls) th = Math.min(32, th * 2);
+        th = Math.max(1, Math.min(th, q.size()));
+        ExecutorService ex = Executors.newFixedThreadPool(th);
+        for (int t = 0; t < th; t++) {
+            ex.submit(new Runnable() {
+                public void run() {
+                    Piece p;
+                    while (!abort.get() && err.get() == null && it.stop == 0 && (p = q.poll()) != null) {
+                        try {
+                            fetch(net, p, dir, live, fin, abort);
+                            cnt.incrementAndGet();
+                        } catch (Throwable e) {
+                            err.compareAndSet(null, e);
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+
+        long last = SystemClock.elapsedRealtime(), lastBytes = live.get(), lastSave = last;
+        try {
+            while (cnt.get() < total && err.get() == null && it.stop == 0) {
+                Thread.sleep(300);
+                long now = SystemClock.elapsedRealtime();
+                long b = live.get();
+                long inst = Math.max(0, (b - lastBytes) * 1000 / Math.max(1, now - last));
+                it.speed = it.speed == 0 ? inst : (it.speed * 6 + inst * 4) / 10;
+                last = now;
+                lastBytes = b;
+                it.done = b;
+                int c = cnt.get();
+                it.pieceDone = c;
+                if (it.hls && c >= 2) it.total = fin.get() * total / c;
+                if (now - lastSave > 3000) { lastSave = now; Dl.save(); }
+                Dl.ui();
+            }
+        } finally {
+            abort.set(true);
+            ex.shutdownNow();
+            try { ex.awaitTermination(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+            File[] left = dir.listFiles();
+            if (left != null) for (File f : left) if (f.getName().endsWith(".tmp")) f.delete();
+        }
+        it.done = live.get();
+        it.pieceDone = cnt.get();
+        if (it.stop != 0) throw new Net.Stop();
+        Throwable e = err.get();
+        if (e != null) {
+            if (e instanceof Exception) throw (Exception) e;
+            throw new RuntimeException(e);
+        }
+    }
+
+    void fetch(Net net, Piece p, File dir, AtomicLong live, AtomicLong fin, AtomicBoolean abort) throws Exception {
+        File out = pf(dir, p.idx);
+        File tmp = new File(dir, "p_" + p.idx + ".tmp");
+        for (int attempt = 0; ; attempt++) {
+            long counted = 0;
+            try {
+                String u = p.url != null ? p.url : it.url;
+                HttpURLConnection c = net.open(u, p.start >= 0 ? "bytes=" + p.start + "-" + p.end : null);
+                if (p.start >= 0 && c.getResponseCode() == 200) {
+                    c.disconnect();
+                    throw new IOException("O servidor ignorou o pedido de trecho (Range)");
+                }
+                long written = 0;
+                byte[] b = new byte[65536];
+                int n;
+                if (p.key != null) {
+                    ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                    try (InputStream in = c.getInputStream()) {
+                        while ((n = in.read(b)) != -1) {
+                            if (abort.get()) throw new Net.Stop();
+                            net.check();
+                            bo.write(b, 0, n);
+                            live.addAndGet(n);
+                            counted += n;
+                        }
+                    }
+                    byte[] k = keys.get(p.key);
+                    if (k == null) { k = net.bytes(p.key); keys.put(p.key, k); }
+                    byte[] d = decrypt(bo.toByteArray(), k, p);
+                    try (OutputStream o = new FileOutputStream(tmp)) { o.write(d); }
+                    live.addAndGet(d.length - counted);
+                    counted = d.length;
+                    written = d.length;
+                } else {
+                    try (InputStream in = c.getInputStream(); OutputStream o = new FileOutputStream(tmp)) {
+                        while ((n = in.read(b)) != -1) {
+                            if (abort.get()) throw new Net.Stop();
+                            net.check();
+                            o.write(b, 0, n);
+                            live.addAndGet(n);
+                            counted += n;
+                            written += n;
+                        }
+                    }
+                }
+                if (p.size >= 0 && written != p.size) {
+                    throw new IOException("Download incompleto (" + written + " de " + p.size + " bytes)");
+                }
+                if (!tmp.renameTo(out)) throw new IOException("Falha ao gravar a parte " + p.idx);
+                fin.addAndGet(written);
+                return;
+            } catch (Net.Stop s) {
+                live.addAndGet(-counted);
+                tmp.delete();
+                throw s;
+            } catch (IOException e) {
+                live.addAndGet(-counted);
+                tmp.delete();
+                if (it.stop != 0 || abort.get()) throw new Net.Stop();
+                boolean fatal = e instanceof Net.HttpException && ((Net.HttpException) e).fatal();
+                if (fatal || attempt >= 3) throw e;
+                Thread.sleep(600L * (attempt + 1));
+            }
+        }
+    }
+
+    static byte[] decrypt(byte[] d, byte[] k, Piece s) throws Exception {
         byte[] iv = new byte[16];
         if (s.iv != null) {
             String h = s.iv.startsWith("0x") || s.iv.startsWith("0X") ? s.iv.substring(2) : s.iv;
@@ -255,19 +437,9 @@ final class Downloader implements Runnable {
         return c.doFinal(d);
     }
 
-    static String attr(String line, String name) {
-        Matcher m = Pattern.compile("(?:^|[:,])" + name + "=(\"([^\"]*)\"|[^,]*)").matcher(line);
-        if (!m.find()) return null;
-        return m.group(2) != null ? m.group(2) : m.group(1);
-    }
+    // ------------------------------------------------- salvar em Downloads
 
-    static String resolve(String base, String rel) throws IOException {
-        return new URL(new URL(base), rel).toString();
-    }
-
-    // ---------- Salvar em Downloads/Anime-Down ----------
-
-    String publish(File f, String fname, String mime) throws Exception {
+    String publish(List<File> files, String fname, String mime) throws Exception {
         if (Build.VERSION.SDK_INT >= 29) {
             ContentResolver r = ctx.getContentResolver();
             ContentValues v = new ContentValues();
@@ -277,8 +449,11 @@ final class Downloader implements Runnable {
             v.put(MediaStore.Downloads.IS_PENDING, 1);
             Uri u = r.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
             if (u == null) throw new IOException("Não foi possível criar o arquivo em Downloads");
-            try (OutputStream o = r.openOutputStream(u); InputStream i = new FileInputStream(f)) {
-                copy(i, o);
+            try (OutputStream o = r.openOutputStream(u)) {
+                concat(files, o);
+            } catch (Exception e) {
+                r.delete(u, null, null);
+                throw e;
             }
             v.clear();
             v.put(MediaStore.Downloads.IS_PENDING, 0);
@@ -293,8 +468,8 @@ final class Downloader implements Runnable {
         File out = new File(dir, fname);
         int n = 1;
         while (out.exists()) out = new File(dir, b + " (" + (n++) + ")" + e);
-        try (OutputStream o = new FileOutputStream(out); InputStream i = new FileInputStream(f)) {
-            copy(i, o);
+        try (OutputStream o = new FileOutputStream(out)) {
+            concat(files, o);
         }
         final Uri[] res = new Uri[1];
         final CountDownLatch latch = new CountDownLatch(1);
@@ -306,17 +481,45 @@ final class Downloader implements Runnable {
         return res[0] != null ? res[0].toString() : Uri.fromFile(out).toString();
     }
 
-    static void copy(InputStream i, OutputStream o) throws IOException {
-        byte[] b = new byte[65536];
-        int n;
-        while ((n = i.read(b)) != -1) o.write(b, 0, n);
+    static void concat(List<File> files, OutputStream o) throws IOException {
+        byte[] b = new byte[262144];
+        for (File f : files) {
+            try (InputStream i = new FileInputStream(f)) {
+                int n;
+                while ((n = i.read(b)) != -1) o.write(b, 0, n);
+            }
+        }
     }
 
-    // ---------- helpers ----------
+    // --------------------------------------------------------------- helpers
+
+    static File pf(File dir, int idx) { return new File(dir, "p_" + idx); }
+
+    static boolean hasParts(File dir) {
+        File[] fs = dir.listFiles();
+        if (fs == null) return false;
+        for (File f : fs) if (f.getName().startsWith("p_") && !f.getName().endsWith(".tmp")) return true;
+        return false;
+    }
+
+    static void wipe(File dir) {
+        File[] fs = dir.listFiles();
+        if (fs != null) for (File f : fs) f.delete();
+    }
 
     static boolean isHls(String url) {
         String p = Uri.parse(url).getPath();
         return p != null && p.toLowerCase().contains(".m3u8");
+    }
+
+    static String attr(String line, String name) {
+        Matcher m = Pattern.compile("(?:^|[:,])" + name + "=(\"([^\"]*)\"|[^,]*)").matcher(line);
+        if (!m.find()) return null;
+        return m.group(2) != null ? m.group(2) : m.group(1);
+    }
+
+    static String resolve(String base, String rel) throws IOException {
+        return new URL(new URL(base), rel).toString();
     }
 
     static String extFor(String url, String ct) {

@@ -4,24 +4,28 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.KeyEvent;
+import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
+import android.webkit.URLUtil;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Button;
+import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ProgressBar;
@@ -30,8 +34,14 @@ import android.widget.Toast;
 
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,13 +49,18 @@ public class MainActivity extends Activity {
     WebView web;
     EditText urlBar;
     ProgressBar bar;
-    Button btnFound;
+    android.widget.Button btnFound;
     FrameLayout root;
-    View content;
+    View content, activeBox;
+    TextView activeTxt;
+    ProgressBar activeProg;
     View customView;
     WebChromeClient.CustomViewCallback customCb;
     WebChromeClient chrome;
     final LinkedHashSet<String> vids = new LinkedHashSet<>();
+    final Runnable activeListener = new Runnable() {
+        public void run() { updateActive(); }
+    };
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -55,8 +70,11 @@ public class MainActivity extends Activity {
         content = findViewById(R.id.content);
         urlBar = (EditText) findViewById(R.id.url);
         bar = (ProgressBar) findViewById(R.id.progress);
-        btnFound = (Button) findViewById(R.id.btnFound);
+        btnFound = (android.widget.Button) findViewById(R.id.btnFound);
         web = (WebView) findViewById(R.id.web);
+        activeBox = findViewById(R.id.activeBox);
+        activeTxt = (TextView) findViewById(R.id.activeTxt);
+        activeProg = (ProgressBar) findViewById(R.id.activeProg);
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -128,12 +146,14 @@ public class MainActivity extends Activity {
 
         web.setDownloadListener(new android.webkit.DownloadListener() {
             @Override public void onDownloadStart(final String url, String ua, String cd, String mime, long len) {
-                final String name = android.webkit.URLUtil.guessFileName(url, cd, mime);
+                final String name = URLUtil.guessFileName(url, cd, mime);
                 new AlertDialog.Builder(MainActivity.this)
                         .setTitle("Baixar arquivo?")
-                        .setMessage(name)
-                        .setPositiveButton("Baixar", new android.content.DialogInterface.OnClickListener() {
-                            public void onClick(android.content.DialogInterface d, int w) { queue(url, name, web.getUrl()); }
+                        .setMessage(name + (len > 0 ? "\n" + Fmt.size(len) : ""))
+                        .setPositiveButton("Baixar", new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface d, int w) {
+                                addItem(url, name, 0, "", len);
+                            }
                         })
                         .setNegativeButton("Cancelar", null)
                         .show();
@@ -160,26 +180,49 @@ public class MainActivity extends Activity {
                     return;
                 }
                 String n = Uri.parse(t).getLastPathSegment();
-                queue(t, n == null ? "video" : n, null);
+                List<String> one = new ArrayList<>();
+                one.add(t);
+                showQuality(one, n == null ? "video" : n);
             }
         });
         findViewById(R.id.btnList).setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { startActivity(new Intent(MainActivity.this, DownloadsActivity.class)); }
+            public void onClick(View v) { openDownloads(); }
+        });
+        activeBox.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { openDownloads(); }
         });
         btnFound.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { showFound(); }
+            public void onClick(View v) {
+                List<String> l = new ArrayList<>(vids);
+                if (l.size() > 15) l = new ArrayList<>(l.subList(0, 15));
+                showQuality(l, null);
+            }
         });
 
         List<String> perms = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS);
         if (Build.VERSION.SDK_INT < 29
-                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
             perms.add(Manifest.permission.WRITE_EXTERNAL_STORAGE);
         }
         if (!perms.isEmpty()) requestPermissions(perms.toArray(new String[0]), 1);
 
-        if (b == null && !handleIntent(getIntent())) web.loadUrl("file:///android_asset/home.html");
-        else if (b != null) web.restoreState(b);
+        if (b == null) {
+            if (!handleIntent(getIntent())) web.loadUrl("file:///android_asset/home.html");
+        } else {
+            web.restoreState(b);
+        }
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        Dl.listeners.add(activeListener);
+        updateActive();
+    }
+
+    @Override protected void onPause() {
+        Dl.listeners.remove(activeListener);
+        super.onPause();
     }
 
     @Override protected void onSaveInstanceState(Bundle o) {
@@ -190,6 +233,26 @@ public class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
         handleIntent(i);
+    }
+
+    void openDownloads() { startActivity(new Intent(this, DownloadsActivity.class)); }
+
+    void updateActive() {
+        String s = Dl.summary();
+        if (s == null) {
+            activeBox.setVisibility(View.GONE);
+            return;
+        }
+        activeBox.setVisibility(View.VISIBLE);
+        activeTxt.setText(s + "   ›");
+        int pm = Dl.overallPermille();
+        if (pm < 0) {
+            activeProg.setIndeterminate(true);
+        } else {
+            activeProg.setIndeterminate(false);
+            activeProg.setMax(1000);
+            activeProg.setProgress(pm);
+        }
     }
 
     boolean handleIntent(Intent i) {
@@ -227,44 +290,119 @@ public class MainActivity extends Activity {
 
     void addFound(String u) {
         if (vids.add(u)) updateFound();
+        Dl.detected.remove(u);
+        Dl.detected.add(u);
+        while (Dl.detected.size() > 40) Dl.detected.remove(Dl.detected.iterator().next());
     }
 
     void updateFound() {
         if (vids.isEmpty()) {
             btnFound.setVisibility(View.GONE);
         } else {
-            btnFound.setText("⬇  Vídeos detectados (" + vids.size() + ")");
+            btnFound.setText("⬇  Baixar vídeo (" + vids.size() + " detectado" + (vids.size() > 1 ? "s" : "") + ")");
             btnFound.setVisibility(View.VISIBLE);
         }
     }
 
-    void showFound() {
-        final List<String> list = new ArrayList<>(vids);
-        String[] labels = new String[list.size()];
-        for (int i = 0; i < labels.length; i++) {
-            Uri u = Uri.parse(list.get(i));
-            String seg = u.getLastPathSegment();
-            labels[i] = (seg == null ? "video" : seg) + "\n" + u.getHost();
-        }
-        new AlertDialog.Builder(this)
-                .setTitle("Escolha o vídeo")
-                .setItems(labels, new android.content.DialogInterface.OnClickListener() {
-                    public void onClick(android.content.DialogInterface d, int which) {
-                        String u = list.get(which);
-                        String title = web.getTitle();
-                        String name = (title == null || title.trim().isEmpty() || title.startsWith("file:"))
-                                ? String.valueOf(Uri.parse(u).getLastPathSegment()) : title;
-                        queue(u, name, web.getUrl());
+    // ------------------------------------------------ qualidades e tamanhos
+
+    void showQuality(final List<String> urls, final String nameOverride) {
+        final List<Probe.Opt> shown = new ArrayList<>();
+        final Map<String, List<Probe.Opt>> results = new LinkedHashMap<>();
+        final int[] pending = {urls.size()};
+        final ArrayAdapter<Probe.Opt> ad = new ArrayAdapter<Probe.Opt>(this, R.layout.row_quality, R.id.q_title, shown) {
+            @Override public View getView(int i, View v, ViewGroup p) {
+                if (v == null) v = LayoutInflater.from(getContext()).inflate(R.layout.row_quality, p, false);
+                Probe.Opt o = getItem(i);
+                ((TextView) v.findViewById(R.id.q_title)).setText(o.label);
+                ((TextView) v.findViewById(R.id.q_sub)).setText(o.sub());
+                return v;
+            }
+        };
+        final AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("Analisando…")
+                .setAdapter(ad, new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int which) {
+                        queueOpt(shown.get(which), nameOverride);
                     }
                 })
                 .setNegativeButton("Fechar", null)
-                .show();
+                .create();
+        dlg.show();
+
+        final String referer = web.getUrl();
+        final String ua = web.getSettings().getUserAgentString();
+        for (final String u : urls) {
+            final String cookie = CookieManager.getInstance().getCookie(u);
+            Probe.pool.execute(new Runnable() {
+                public void run() {
+                    List<Probe.Opt> r;
+                    try {
+                        r = Probe.run(new Net(ua, referer, cookie, u, null), u);
+                    } catch (Throwable e) {
+                        r = new ArrayList<>();
+                        Probe.Opt o = new Probe.Opt();
+                        o.url = u;
+                        o.hls = Downloader.isHls(u);
+                        r.add(o);
+                    }
+                    final List<Probe.Opt> rr = r;
+                    runOnUiThread(new Runnable() {
+                        public void run() {
+                            results.put(u, rr);
+                            pending[0]--;
+                            rebuildQuality(shown, results, ad);
+                            if (pending[0] > 0) dlg.setTitle("Analisando… (" + pending[0] + ")");
+                            else dlg.setTitle(shown.isEmpty() ? "Nenhuma opção encontrada" : "Escolha a qualidade");
+                        }
+                    });
+                }
+            });
+        }
     }
 
-    void queue(String url, String name, String referer) {
-        String cookie = CookieManager.getInstance().getCookie(url);
-        Dl.add(this, url, name, referer, web.getSettings().getUserAgentString(), cookie);
-        Toast.makeText(this, "Download iniciado. Veja no botão ☰", Toast.LENGTH_SHORT).show();
+    static void rebuildQuality(List<Probe.Opt> shown, Map<String, List<Probe.Opt>> results, ArrayAdapter<Probe.Opt> ad) {
+        Set<String> variantUrls = new HashSet<>();
+        for (List<Probe.Opt> l : results.values()) for (Probe.Opt o : l) if (o.variant) variantUrls.add(o.url);
+        LinkedHashMap<String, Probe.Opt> uniq = new LinkedHashMap<>();
+        for (List<Probe.Opt> l : results.values()) {
+            for (Probe.Opt o : l) {
+                if (!o.variant && o.hls && variantUrls.contains(o.url)) continue;
+                if (!o.hls && o.size > 0 && o.size < 200 * 1024) continue;
+                if (!uniq.containsKey(o.url)) uniq.put(o.url, o);
+            }
+        }
+        shown.clear();
+        shown.addAll(uniq.values());
+        Collections.sort(shown, new Comparator<Probe.Opt>() {
+            public int compare(Probe.Opt a, Probe.Opt b) {
+                if (a.height != b.height) return b.height - a.height;
+                return Long.compare(b.size, a.size);
+            }
+        });
+        ad.notifyDataSetChanged();
+    }
+
+    void queueOpt(Probe.Opt o, String nameOverride) {
+        String base = nameOverride;
+        if (base == null || base.trim().isEmpty()) {
+            String title = web.getTitle();
+            if (title == null || title.trim().isEmpty() || title.startsWith("file:") || title.equals("Anime-Down")) {
+                String seg = Uri.parse(o.url).getLastPathSegment();
+                title = seg == null ? "video" : seg;
+            }
+            base = title;
+        }
+        if (!"Original".equals(o.label)) base += " [" + o.label + "]";
+        addItem(o.url, base, o.height, "Original".equals(o.label) ? "" : o.label, o.size);
+    }
+
+    void addItem(String url, String name, int height, String quality, long size) {
+        String referer = web.getUrl();
+        if (referer != null && referer.startsWith("file:")) referer = null;
+        Dl.add(this, url, name, referer, web.getSettings().getUserAgentString(),
+                CookieManager.getInstance().getCookie(url), height, quality, size);
+        Toast.makeText(this, "Download iniciado. Acompanhe na barra abaixo ou no botão ☰", Toast.LENGTH_SHORT).show();
     }
 
     @Override public void onBackPressed() {

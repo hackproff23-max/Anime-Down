@@ -3,6 +3,7 @@ package com.animedown.app;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.ClipboardManager;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.net.Uri;
@@ -12,23 +13,27 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
+import android.widget.EditText;
 import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
 
 public class DownloadsActivity extends Activity {
     ListView list;
     View empty;
+    TextView summary;
     BaseAdapter adapter;
     final Runnable refresh = new Runnable() {
         public void run() {
             adapter.notifyDataSetChanged();
             empty.setVisibility(Dl.items.isEmpty() ? View.VISIBLE : View.GONE);
+            String s = Dl.summary();
+            summary.setText(s == null ? Dl.items.size() + " item(ns)" : s);
         }
     };
 
@@ -38,6 +43,7 @@ public class DownloadsActivity extends Activity {
         setContentView(R.layout.downloads);
         list = (ListView) findViewById(R.id.list);
         empty = findViewById(R.id.empty);
+        summary = (TextView) findViewById(R.id.summary);
         adapter = new BaseAdapter() {
             public int getCount() { return Dl.items.size(); }
             public Object getItem(int i) { return Dl.items.get(Dl.items.size() - 1 - i); }
@@ -47,16 +53,13 @@ public class DownloadsActivity extends Activity {
                 Item it = (Item) getItem(i);
                 ((TextView) v.findViewById(R.id.name)).setText(it.name);
                 ProgressBar pb = (ProgressBar) v.findViewById(R.id.prog);
-                if (it.status == Item.RUNNING && it.total > 0) {
-                    pb.setIndeterminate(false);
-                    pb.setMax(1000);
-                    pb.setProgress((int) (it.done * 1000 / it.total));
-                } else if (it.status == Item.RUNNING || it.status == Item.QUEUED) {
+                int pm = Fmt.permille(it);
+                if ((it.status == Item.RUNNING || it.status == Item.QUEUED) && pm < 0) {
                     pb.setIndeterminate(true);
                 } else {
                     pb.setIndeterminate(false);
                     pb.setMax(1000);
-                    pb.setProgress(it.status == Item.DONE ? 1000 : 0);
+                    pb.setProgress(Math.max(0, pm));
                 }
                 ((TextView) v.findViewById(R.id.info)).setText(info(it));
                 return v;
@@ -68,6 +71,9 @@ public class DownloadsActivity extends Activity {
         });
         findViewById(R.id.btnClear).setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { Dl.clearFinished(); }
+        });
+        findViewById(R.id.btnSettings).setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { settings(); }
         });
     }
 
@@ -83,29 +89,59 @@ public class DownloadsActivity extends Activity {
     }
 
     static String info(Item it) {
+        int pm = Fmt.permille(it);
+        String pct = pm >= 0 ? (pm / 10) + "%" : "";
+        String sizes = "";
+        if (it.total > 0) sizes = Fmt.size(Math.min(it.done, it.total)) + " / " + (it.hls ? "~" : "") + Fmt.size(it.total);
+        else if (it.done > 0) sizes = Fmt.size(it.done);
         switch (it.status) {
-            case Item.QUEUED: return "Na fila";
-            case Item.RUNNING:
-                if (it.hls) return "Baixando segmento " + it.done + " de " + it.total;
-                if (it.total > 0) return size(it.done) + " / " + size(it.total) + "  (" + (it.done * 100 / it.total) + "%)";
-                return size(it.done);
-            case Item.DONE: return "Concluído • Download/Anime-Down";
-            case Item.CANCELED: return "Cancelado";
-            default: return "Erro: " + it.msg;
+            case Item.QUEUED:
+                return "Na fila";
+            case Item.RUNNING: {
+                if (!it.msg.isEmpty()) return it.msg;
+                StringBuilder s = new StringBuilder();
+                join(s, pct);
+                join(s, sizes);
+                if (it.speed > 0) join(s, Fmt.speed(it.speed));
+                if (it.speed > 0 && it.total > it.done) join(s, Fmt.eta((it.total - it.done) / it.speed) + " restante");
+                if (it.hls && it.pieceTotal > 0) s.append("\nParte ").append(it.pieceDone).append(" de ").append(it.pieceTotal);
+                return s.toString();
+            }
+            case Item.PAUSED: {
+                StringBuilder s = new StringBuilder("Pausado");
+                join(s, pct);
+                join(s, sizes);
+                s.append("\nToque para continuar");
+                return s.toString();
+            }
+            case Item.DONE:
+                return "Concluído  •  " + (it.total > 0 ? Fmt.size(it.total) + "  •  " : "") + "Download/Anime-Down";
+            case Item.CANCELED:
+                return "Cancelado";
+            default: {
+                String s = "Erro: " + it.msg;
+                if (pm > 0) s += "\n" + pct + " já baixado e guardado. Toque para continuar.";
+                return s;
+            }
         }
     }
 
-    static String size(long b) {
-        if (b < 1024 * 1024) return String.format(Locale.US, "%.0f KB", b / 1024.0);
-        if (b < 1024L * 1024 * 1024) return String.format(Locale.US, "%.1f MB", b / 1048576.0);
-        return String.format(Locale.US, "%.2f GB", b / 1073741824.0);
+    static void join(StringBuilder s, String part) {
+        if (part.isEmpty()) return;
+        if (s.length() > 0) s.append("  •  ");
+        s.append(part);
     }
 
     void actions(final Item it) {
         final List<String> o = new ArrayList<>();
         if (it.status == Item.DONE) o.add("Abrir");
-        if (it.status == Item.RUNNING || it.status == Item.QUEUED) o.add("Cancelar");
-        if (it.status == Item.ERROR || it.status == Item.CANCELED) o.add("Tentar de novo");
+        if (it.status == Item.RUNNING || it.status == Item.QUEUED) o.add("Pausar");
+        if (it.status == Item.PAUSED || it.status == Item.ERROR) {
+            o.add("Continuar");
+            o.add("Atualizar link (continua de onde parou)");
+        }
+        if (it.status == Item.CANCELED) o.add("Baixar de novo");
+        if (it.status != Item.DONE && it.status != Item.CANCELED) o.add("Cancelar e apagar parcial");
         o.add("Remover da lista");
         new AlertDialog.Builder(this)
                 .setTitle(it.name)
@@ -113,9 +149,84 @@ public class DownloadsActivity extends Activity {
                     public void onClick(DialogInterface d, int w) {
                         String a = o.get(w);
                         if (a.equals("Abrir")) open(it);
-                        else if (a.equals("Cancelar")) Dl.cancel(it);
-                        else if (a.equals("Tentar de novo")) Dl.start(it);
+                        else if (a.equals("Pausar")) Dl.pause(it);
+                        else if (a.equals("Continuar") || a.equals("Baixar de novo")) Dl.start(it);
+                        else if (a.startsWith("Atualizar")) updateLink(it);
+                        else if (a.startsWith("Cancelar")) Dl.cancel(it);
                         else Dl.remove(it);
+                    }
+                }).show();
+    }
+
+    void updateLink(final Item it) {
+        final List<String> det = new ArrayList<>(Dl.detected);
+        Collections.reverse(det);
+        if (det.size() > 15) det.subList(15, det.size()).clear();
+        final List<String> labels = new ArrayList<>();
+        labels.add("✏  Colar um link novo");
+        for (String u : det) {
+            Uri p = Uri.parse(u);
+            String seg = p.getLastPathSegment();
+            labels.add((seg == null ? "video" : seg) + "\n" + p.getHost());
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Novo link para este download")
+                .setItems(labels.toArray(new String[0]), new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        if (w == 0) pasteLink(it); else apply(it, det.get(w - 1));
+                    }
+                })
+                .setNegativeButton("Fechar", null)
+                .show();
+    }
+
+    void pasteLink(final Item it) {
+        final EditText et = new EditText(this);
+        et.setHint("https://...");
+        et.setMaxLines(4);
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip().getItemCount() > 0) {
+                CharSequence t = cm.getPrimaryClip().getItemAt(0).getText();
+                if (t != null && t.toString().trim().matches("(?i)^https?://\\S+$")) et.setText(t.toString().trim());
+            }
+        } catch (Exception ignored) {
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Colar link novo")
+                .setView(et)
+                .setPositiveButton("Continuar", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        String t = et.getText().toString().trim();
+                        if (!t.matches("(?i)^https?://\\S+$")) {
+                            Toast.makeText(DownloadsActivity.this, "Link inválido", Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        apply(it, t);
+                    }
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    void apply(Item it, String url) {
+        Dl.updateLink(it, url);
+        Toast.makeText(this, "Link atualizado. Continuando de onde parou.", Toast.LENGTH_SHORT).show();
+    }
+
+    void settings() {
+        final int[] opts = {4, 8, 16, 32};
+        String[] labels = new String[opts.length];
+        int cur = Dl.threads();
+        for (int i = 0; i < opts.length; i++) {
+            labels[i] = opts[i] + " conexões" + (opts[i] == cur ? "  (atual)" : "") + (opts[i] == 8 ? "  •  padrão" : "");
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Conexões simultâneas por download")
+                .setItems(labels, new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        Dl.setThreads(opts[w]);
+                        Toast.makeText(DownloadsActivity.this, "Vale para os próximos downloads e ao continuar", Toast.LENGTH_SHORT).show();
                     }
                 }).show();
     }

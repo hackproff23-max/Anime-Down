@@ -67,6 +67,29 @@
             android:layout_height="0dp"
             android:layout_weight="1" />
 
+        <LinearLayout
+            android:id="@+id/activeBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#1B1B28"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <ProgressBar
+                android:id="@+id/activeProg"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="4dp" />
+
+            <TextView
+                android:id="@+id/activeTxt"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="10dp"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp" />
+        </LinearLayout>
+
         <Button
             android:id="@+id/btnFound"
             android:layout_width="match_parent"

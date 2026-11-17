@@ -51,14 +51,14 @@ public class DownloadService extends Service {
         int act = Dl.active();
         b.setSmallIcon(android.R.drawable.stat_sys_download)
          .setContentTitle("Anime-Down")
-         .setContentText(act + (act == 1 ? " download em andamento" : " downloads em andamento"))
+         .setContentText(Dl.summary() != null ? Dl.summary() : act + " em andamento")
          .setOngoing(true);
         PendingIntent pi = PendingIntent.getActivity(this, 0, new Intent(this, DownloadsActivity.class),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         b.setContentIntent(pi);
-        Item r = Dl.firstRunning();
-        if (r != null && r.total > 0) {
-            b.setProgress(100, (int) (r.done * 100 / r.total), false);
+        int pm = Dl.overallPermille();
+        if (pm >= 0) {
+            b.setProgress(1000, pm, false);
         } else {
             b.setProgress(0, 0, true);
         }
