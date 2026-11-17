@@ -19,17 +19,34 @@ final class Probe {
     static class Opt {
         String label = "Original", url;
         long size = -1, bw;
-        boolean estimated, hls, variant;
+        boolean estimated, hls, variant, noAudio;
         int height;
 
         String sub() {
             String s = size > 0 ? (estimated ? "~" : "") + Fmt.size(size) : "tamanho desconhecido";
-            return s + (hls ? "  •  HLS" : "");
+            return s + (hls ? "  •  HLS" : "") + (noAudio ? "  •  sem áudio" : "");
         }
     }
 
-    static List<Opt> run(final Net net, String url) throws Exception {
-        List<Opt> out = new ArrayList<>();
+    static long lengthNoRange(Net net, String url) {
+        try {
+            HttpURLConnection c = net.open(url, null);
+            long n = c.getContentLengthLong();
+            c.disconnect();
+            return n;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+&
+&
+        Opt yt = YtInfo.parse(url);
+        if (yt != null) {
+            if (yt.size <= 0) yt.size = lengthNoRange(net, url);
+            out.add(yt);
+            return out;
+        }
         boolean hls = Downloader.isHls(url);
         if (!hls) {
             Opt direct = null;
@@ -47,7 +64,8 @@ final class Probe {
                     } else {
                         size = c.getContentLengthLong();
                     }
-                    Opt o = new Opt();
+                    if (size <= 0) size = lengthNoRange(net, url);
+&
                     o.url = url;
                     o.size = size;
                     o.height = guessHeight(url);
